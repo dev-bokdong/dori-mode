@@ -51,6 +51,7 @@ export class Supervisor {
     this.lead = new LeadLifecycle(this.core, this.owners, hooks, enqueue);
     this.delivery = new Delivery(this.core, this.owners, this.lead);
     const { tail, cursor } = this.core.recoverLog();
+    this.core.initInbox();
     // Owner state comes from its tracking rows, not from the history: an owner message in the history with neither a
     // row nor a tombstone is quarantined and listed to the lead once, never reminded one by one.
     const quarantined = this.owners.trackOwners(this.core.journal.events, true);

@@ -83,6 +83,20 @@
   "store": "json",
   "ciConfirmMin": 20,
   "ciMergeBase": "dev",
+  "delivery": {
+    "mode": "tail",
+    "tailMonitor": true,
+    "restartMaxPerHour": 3,
+    "push": {
+      "ackSec": 45,
+      "retries": 2,
+      "escalateMin": 5,
+      "maxChars": 200,
+      "pasteCheckMs": 3000,
+      "toWorking": false,
+      "takeMaxBytes": 16384
+    }
+  },
   "diskGuardPath": "",
   "memoryCheck": {
     "repo": "",

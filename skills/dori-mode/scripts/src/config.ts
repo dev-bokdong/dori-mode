@@ -45,6 +45,72 @@ export type MemoryCheckConfig = {
   readonly maxKb: number;
 };
 
+/**
+ * How events reach the lead (supervise-push.ts). `tail`: the lead's own tail monitor on lead-events.log (the default).
+ * `shadow`: tail delivery, while the push step logs what it would do. `push`: the supervisor types a short `[dori]`
+ * pointer into the lead pane and counts events as delivered only once the lead takes them (`dori inbox take`).
+ */
+export type DeliveryMode = "tail" | "shadow" | "push";
+export const DELIVERY_MODES: readonly DeliveryMode[] = ["tail", "shadow", "push"];
+
+export type PushConfig = {
+  /** Untaken this long after a push: push again. */
+  readonly ackSec: number;
+  /** Pushes after the first before LEAD_PUSH_UNTAKEN; later pushes back off, doubling up to 10 min. */
+  readonly retries: number;
+  /** Idle lead: minutes untaken before a cold restart. Working lead: the one-tool-call restart clock. */
+  readonly escalateMin: number;
+  /** Longest pointer line typed into the lead pane. */
+  readonly maxChars: number;
+  /** After a push that did not visibly start a turn, the input line is checked again this many ms later. */
+  readonly pasteCheckMs: number;
+  /** Push into a working lead too (its pointer is queued into the running turn). */
+  readonly toWorking: boolean;
+  /** Default for `dori inbox take --max-bytes`. */
+  readonly takeMaxBytes: number;
+};
+
+export type DeliveryConfig = {
+  readonly mode: DeliveryMode;
+  /** The startup prompt also arms the tail monitor; while on, only an unacked owner message escalates an idle lead. */
+  readonly tailMonitor: boolean;
+  /** Forced restarts and quota switches per rolling hour; past it, push mode refuses unread-driven restarts. */
+  readonly restartMaxPerHour: number;
+  readonly push: PushConfig;
+};
+
+/** delivery.push keys that were removed; a config that still has them loads, with one warning. */
+export const REMOVED_PUSH_KEYS = ["debounceMs"] as const;
+
+/** The supervisor's delivery tick: the push step runs at most once per tick. */
+export const DELIVERY_TICK_SEC = 5;
+
+/** Why `delivery` cannot run, or undefined when it can. */
+export const deliveryConfigError = (delivery: DeliveryConfig): string | undefined => {
+  const { push } = delivery;
+  const positive = (value: number) => Number.isFinite(value) && value > 0;
+  if (!DELIVERY_MODES.includes(delivery.mode)) return `delivery.mode must be one of ${DELIVERY_MODES.join(", ")}`;
+  if (typeof delivery.tailMonitor !== "boolean") return "delivery.tailMonitor must be true or false";
+  if (!Number.isInteger(delivery.restartMaxPerHour) || delivery.restartMaxPerHour < 1) return "delivery.restartMaxPerHour must be an integer of at least 1";
+  if (!Number.isFinite(push.ackSec) || push.ackSec < 2 * DELIVERY_TICK_SEC) return `delivery.push.ackSec must be at least ${2 * DELIVERY_TICK_SEC} (twice the delivery tick)`;
+  if (!Number.isInteger(push.retries) || push.retries < 0) return "delivery.push.retries must be a non-negative integer";
+  if (!positive(push.escalateMin)) return "delivery.push.escalateMin must be positive";
+  if (push.escalateMin * 60 <= push.ackSec * (push.retries + 1)) {
+    return "delivery.push.escalateMin * 60 must exceed ackSec * (retries + 1), so every re-push happens before an escalation";
+  }
+  if (!Number.isInteger(push.maxChars) || push.maxChars < MIN_POINTER_CHARS || push.maxChars > MAX_POINTER_CHARS) {
+    return `delivery.push.maxChars must be an integer from ${MIN_POINTER_CHARS} to ${MAX_POINTER_CHARS}`;
+  }
+  if (!Number.isFinite(push.pasteCheckMs) || push.pasteCheckMs < 0) return "delivery.push.pasteCheckMs must be zero or positive";
+  if (typeof push.toWorking !== "boolean") return "delivery.push.toWorking must be true or false";
+  if (!Number.isInteger(push.takeMaxBytes) || push.takeMaxBytes < 1) return "delivery.push.takeMaxBytes must be a positive integer";
+  return undefined;
+};
+
+/** The shortest pointer (kinds cut to `+N more`) fits in MIN_POINTER_CHARS; omo kept 800 typed chars in one input. */
+export const MIN_POINTER_CHARS = 140;
+export const MAX_POINTER_CHARS = 800;
+
 export type DiscordConfig = {
   readonly applicationId: string;
   readonly guildId: string;
@@ -144,6 +210,8 @@ export type DoriConfig = {
   readonly ciConfirmMin: number;
   /** The only base branch the supervisor merges lane PRs into; `main` is refused whatever this says. */
   readonly ciMergeBase: string;
+  /** How events reach the lead: tail monitor (default), shadow, or pushed pointers with take receipts. */
+  readonly delivery: DeliveryConfig;
 };
 
 /** One lead model: "provider/model", or an object whose `thinking` replaces `leadThinking` for this model only. */
@@ -205,6 +273,10 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   eventPolicy: DEFAULT_EVENT_POLICY,
   ciConfirmMin: 20,
   ciMergeBase: "dev",
+  delivery: {
+    mode: "tail", tailMonitor: true, restartMaxPerHour: 3,
+    push: { ackSec: 45, retries: 2, escalateMin: 5, maxChars: 200, pasteCheckMs: 3_000, toWorking: false, takeMaxBytes: 16_384 },
+  },
 });
 
 /**
@@ -218,6 +290,7 @@ export const REMOVED_FLAGS = [
 
 let warnedRemovedFlags = false;
 let warnedRemovedQuotaKeys = false;
+let warnedRemovedPushKeys = false;
 
 export const configPath = (): string => process.env.DORI_CONFIG ?? join(homedir(), ".dori", "config.json");
 
@@ -240,7 +313,16 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
     console.error(`CONFIG_QUOTA_KEYS_REMOVED quotaGate.${oldGate.join(", quotaGate.")} in ${path}: the Claude gate now compares quota left with time left across every account (quotaGate.holdLanesHeadroomPct, briefHeadroomPct); the keys are ignored and can be deleted`);
   }
   const quotaGate = Object.fromEntries(Object.entries(rawGate).filter(([key]) => !(REMOVED_QUOTA_KEYS as readonly string[]).includes(key))) as Partial<QuotaGate>;
-  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, quotaGate: { ...base.quotaGate, ...quotaGate }, memoryCheck: { ...base.memoryCheck, ...raw.memoryCheck }, hooks: { ...base.hooks, ...raw.hooks } };
+  const rawDelivery = (raw.delivery ?? {}) as Partial<DeliveryConfig>;
+  const rawPush = (rawDelivery.push ?? {}) as Record<string, unknown>;
+  const oldPush = REMOVED_PUSH_KEYS.filter((key) => key in rawPush);
+  if (oldPush.length && !warnedRemovedPushKeys) {
+    warnedRemovedPushKeys = true;
+    console.error(`CONFIG_PUSH_KEYS_REMOVED delivery.push.${oldPush.join(", delivery.push.")} in ${path}: a burst becomes one push through the single outstanding push; the keys are ignored and can be deleted`);
+  }
+  const push = Object.fromEntries(Object.entries(rawPush).filter(([key]) => !(REMOVED_PUSH_KEYS as readonly string[]).includes(key))) as Partial<PushConfig>;
+  const delivery: DeliveryConfig = { ...base.delivery, ...rawDelivery, push: { ...base.delivery.push, ...push } };
+  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, quotaGate: { ...base.quotaGate, ...quotaGate }, memoryCheck: { ...base.memoryCheck, ...raw.memoryCheck }, hooks: { ...base.hooks, ...raw.hooks }, delivery };
   return {
     ...merged,
     eventPolicy: resolveEventPolicy(raw.eventPolicy),

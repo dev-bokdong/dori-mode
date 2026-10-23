@@ -20,7 +20,7 @@ export const SQLITE_FILE = "supervisor.sqlite";
 export const PRE_SQLITE_FILE = "supervisor.json.pre-sqlite";
 /** The json store's lead wakes (lead-wakes.ts), one JSON object per line: a wake, or `{close, calls}` closing one. */
 export const WAKES_FILE = "lead-wakes.jsonl";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 /** Every row belongs to the single lead today; per-lead rows arrive with Phase 3. */
 export const DEFAULT_LEAD = "dori";
 
@@ -178,8 +178,9 @@ CREATE TABLE IF NOT EXISTS lead_state (
  * Schema changes after version 1, each applied once in order. Two lanes adding a migration take consecutive numbers.
  * 2: dedupe tombstones of pruned events, and the GitHub poll state that was github-events.json.
  * 3: lead wakes with their trigger kinds and model calls (lead-wakes.ts).
+ * 4: the lead's take cursor and push state (`inbox`) and the forced restarts of the last hour (supervise-push.ts).
  */
-const MIGRATIONS: readonly (readonly [number, string])[] = [[2, `
+const MIGRATIONS: readonly (readonly [number, string | ((db: Database) => void)])[] = [[2, `
 CREATE TABLE IF NOT EXISTS event_tombstones (id TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS event_tombstones_at ON event_tombstones (at);
 CREATE TABLE IF NOT EXISTS gh_repos (repo TEXT PRIMARY KEY, polled INTEGER NOT NULL DEFAULT 0, issues INTEGER NOT NULL DEFAULT 0, failed_at INTEGER);
@@ -196,7 +197,13 @@ CREATE TABLE IF NOT EXISTS lead_wakes (
   seq INTEGER PRIMARY KEY, lead TEXT NOT NULL, at INTEGER NOT NULL, session TEXT NOT NULL, trigger TEXT NOT NULL, kinds TEXT NOT NULL,
   calls INTEGER, closed INTEGER);
 CREATE INDEX IF NOT EXISTS lead_wakes_at ON lead_wakes (at);
-`]];
+`], [4, (db) => addColumns(db, "lead_state", ["inbox TEXT", "forced_restarts TEXT"])]];
+
+/** ADD COLUMN has no IF NOT EXISTS: a migration replayed over a database that already has a column must skip it. */
+const addColumns = (db: Database, table: string, columns: readonly string[]): void => {
+  const have = new Set((db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name));
+  for (const column of columns) if (!have.has(column.split(" ")[0] ?? "")) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+};
 
 /** `noticed[]` (ids that already got the legacy "not taken yet" notice) shares owner_notices under this kind. */
 const NOTICED_KIND = "noticed";
@@ -206,6 +213,7 @@ const LEAD_STATE = [
   ["leadModel", "lead_model", false], ["primaryRetryAt", "primary_retry_at", false], ["primaryClearChecks", "primary_clear_checks", false],
   ["quotaExhausted", "quota_exhausted", true], ["models", "models", true], ["quotaStallSince", "quota_stall_since", false],
   ["leadBusySince", "lead_busy_since", false], ["leadScreen", "lead_screen", true], ["emergencyEpisode", "emergency_episode", false],
+  ["inbox", "inbox", true], ["forcedRestarts", "forced_restarts", true],
 ] as const satisfies readonly (readonly [keyof Journal, string, boolean])[];
 
 /** Every Journal field this store maps (Appendix D). An import refuses a journal with any other field. */
@@ -255,7 +263,7 @@ export class SqliteStore implements JournalStore {
       const version = Number(this.meta("schema_version") ?? 1);
       if (version > SCHEMA_VERSION) throw new StoreError(`STORE_SCHEMA ${path}: version ${version}, this code reads ${SCHEMA_VERSION}`);
       for (const [to, ddl] of MIGRATIONS) {
-        if (to > version) this.db.transaction(() => { this.db.exec(ddl); this.setMeta("schema_version", String(to)); })();
+        if (to > version) this.db.transaction(() => { if (typeof ddl === "string") this.db.exec(ddl); else ddl(this.db); this.setMeta("schema_version", String(to)); })();
       }
       if (this.meta("schema_version") === undefined) this.setMeta("schema_version", String(SCHEMA_VERSION));
     } catch (e) {

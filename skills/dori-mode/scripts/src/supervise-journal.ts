@@ -5,6 +5,7 @@ import type { FlowDeps } from "./done-flow.ts";
 import type { LeadRestartRequest } from "./lead-restart.ts";
 import { eventClass, forLead } from "./event-policy.ts";
 import { WakeMeter } from "./lead-wakes.ts";
+import { dropTake, pendingTakes, writeCursorFile } from "./inbox.ts";
 import { redactSecrets } from "./redact.ts";
 import { type Durability, type JournalStore, openStore, RETENTION, StoreError } from "./store.ts";
 
@@ -94,7 +95,29 @@ export type Journal = {
   readonly outbox?: readonly OutboxItem[];
   /** While the lead runs on a paid emergency model: the quota episode whose owner approval put it there. */
   readonly emergencyEpisode?: number;
+  /** The lead's take cursor and the outstanding push (supervise-push.ts). */
+  readonly inbox?: Inbox;
+  /** Forced restarts and quota switches of the last hour: the restart cap (delivery.restartMaxPerHour). */
+  readonly forcedRestarts?: readonly ForcedRestart[];
 };
+/**
+ * `takenOffset`: lead-events.log is taken (`dori inbox take` receipts) up to this byte, always a line end. `mode` is the
+ * delivery mode the cursor was kept under, `sessionSince` the last LEAD_RESTARTED, `capNotice` the hour of the last
+ * restart-cap notice.
+ */
+export type Inbox = {
+  readonly takenOffset: number;
+  readonly mode?: string;
+  readonly sessionSince?: number;
+  readonly capNotice?: number;
+  readonly push?: InboxPush;
+};
+/**
+ * The outstanding push: when it was last sent, the log size it covered, pushes since the cursor last moved, its batch id,
+ * and the first push attempt for this untaken range (the escalation clock starts there at the earliest).
+ */
+export type InboxPush = { readonly at: number; readonly upto: number; readonly attempts: number; readonly batch: string; readonly first: number; readonly untakenLogged?: true };
+export type ForcedRestart = { readonly at: number; readonly cause: string };
 export type OutboxItem = { readonly id: string; readonly text: string; readonly attempts?: number; readonly retryAt?: number };
 
 export class SuperviseError extends Error {}
@@ -104,6 +127,9 @@ export class SuperviseError extends Error {}
  * confirmed). Delivery retries these with backoff; any other SuperviseError is fatal and exits.
  */
 export class TransientSuperviseError extends SuperviseError {}
+
+/** The window of the restart cap (delivery.restartMaxPerHour). */
+export const RESTART_CAP_WINDOW_MS = 60 * 60_000;
 
 /** How often retention runs (from ackTick, once per loop pass at most). */
 export const RETAIN_EVERY_MS = 60 * 60_000;
@@ -210,6 +236,72 @@ export class JournalCore {
 
   /** Releases the store (tests and shutdown); the supervisor must not be used afterwards. */
   close(): void { this.store.close(); }
+
+  logSize(): number { return statSync(this.eventLog).size; }
+
+  /**
+   * At start: consume waiting take receipts, then place the take cursor. A first start puts it at the log's end (no
+   * replay flood). Entering push or shadow from tail, or turning the tail monitor off, advances it to the end too: the
+   * tail monitor delivered everything before (N6). A cursor past the log's end is reset to it. The cursor file is
+   * published every time, so `dori inbox take` works in every mode.
+   */
+  initInbox(): void {
+    this.consumeTakes();
+    const { mode, tailMonitor } = this.deps.config.delivery;
+    const key = `${mode}${tailMonitor ? "+tail" : ""}`;
+    const size = this.logSize();
+    const inbox = this.journal.inbox;
+    const [was = "", wasTail = true] = inbox?.mode ? [inbox.mode.split("+")[0], inbox.mode.endsWith("+tail")] : [];
+    const advance = inbox !== undefined && mode !== "tail" && (was === "" || was === "tail" || (wasTail && !tailMonitor));
+    let takenOffset = inbox?.takenOffset ?? size;
+    if (advance && takenOffset !== size) console.log(`INBOX_CURSOR_ADVANCED ${takenOffset} -> ${size} (${inbox?.mode ?? "none"} -> ${key})`);
+    if (advance) takenOffset = size;
+    if (takenOffset > size) {
+      console.log(`INBOX_CURSOR_RESET ${takenOffset} -> ${size}: ${this.eventLog} is shorter than the take cursor`);
+      takenOffset = size;
+    }
+    const moved = takenOffset !== inbox?.takenOffset;
+    this.journal = { ...this.journal, inbox: { ...inbox, takenOffset, mode: key, ...(moved ? { push: undefined } : {}) } };
+    this.persist();
+    writeCursorFile(this.deps.config.stateDir, takenOffset);
+  }
+
+  /**
+   * Take receipts move the cursor forward only, in a crash-safe order: the store is persisted, then the cursor file is
+   * written, and only then are the receipts dropped. A crash at any point leaves `max(cursor file, receipts)` at or past
+   * the new cursor, so a take never reprints. A moved cursor clears the outstanding push.
+   */
+  consumeTakes(): void {
+    const inbox = this.journal.inbox;
+    if (!inbox) return;
+    const receipts = pendingTakes(this.deps.config.stateDir);
+    if (!receipts.length) return;
+    const size = this.logSize();
+    let takenOffset = Math.max(inbox.takenOffset, ...receipts.map((receipt) => receipt.offset));
+    if (takenOffset > size) {
+      console.log(`INBOX_CURSOR_RESET ${takenOffset} -> ${size}: a take receipt is past the end of ${this.eventLog}`);
+      takenOffset = size;
+    }
+    if (takenOffset !== inbox.takenOffset) {
+      this.journal = { ...this.journal, inbox: { ...inbox, takenOffset, push: undefined } };
+      this.persist();
+    }
+    writeCursorFile(this.deps.config.stateDir, takenOffset);
+    for (const receipt of receipts) dropTake(receipt.path);
+  }
+
+  /** Forced restarts and quota switches within the cap window. */
+  forcedRestartsSince(now: number): number {
+    return (this.journal.forcedRestarts ?? []).filter((restart) => now - restart.at < RESTART_CAP_WINDOW_MS).length;
+  }
+
+  /** Records a forced restart or quota switch that really stopped the lead; the list keeps only the cap window. */
+  noteForcedRestart(cause: string): void {
+    const now = this.deps.clock.now();
+    const kept = (this.journal.forcedRestarts ?? []).filter((restart) => now - restart.at < RESTART_CAP_WINDOW_MS);
+    this.journal = { ...this.journal, forcedRestarts: [...kept, { at: now, cause }] };
+    this.persist();
+  }
 
   /** closedOwners as a set, rebuilt only when the list changes: it holds up to 90 days of tombstones. */
   closedSet(): ReadonlySet<string> {
