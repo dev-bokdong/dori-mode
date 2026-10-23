@@ -735,12 +735,13 @@ export class LeadLifecycle {
     // The new lead can read now: every message handed to it (in its prompt or log) and still waiting for its ack gets a
     // fresh window from here, so neither a cold-start batch nor a message the old lead never acked is escalated while
     // this lead boots. A message that arrived during startup and is not delivered yet gets its window when it is.
-    // A posted notice stays posted.
+    // A posted notice stays posted, and so does a reminder: the new lead gets the message in its handoff, so it is never
+    // reminded with ACK_MISSING a second time (one reminder per message, however many restarts).
     const ready = deps.clock.now();
     this.journal = {
       ...this.journal,
       awaitingAck: this.journal.awaitingAck?.map((entry) => entry.quarantined || !this.delivered.has(latest(entry)) ? entry : {
-        ...entry, since: ready, reminded: undefined,
+        ...entry, since: ready,
         ...(entry.ackedAt !== undefined && entry.handledAt === undefined ? { handlingSince: ready, unhandledRemindedAt: undefined } : {}),
       }),
     };

@@ -99,7 +99,8 @@ test("a lane PR's failing checks are checks_failing, digest for the lead (CI fol
   expect(f.events[0]?.line).toContain(" checks_update ");
 });
 
-test.each([["merged", "urgent"], ["closed", "urgent"], ["conflicting", "digest"]] as const)("PR %s is %s and restart does not replay it", async (kind, priority) => {
+// A merged lane PR is read back and settled by the supervisor (MERGE_VERIFIED), so for the lead it is digest.
+test.each([["merged", "digest"], ["closed", "urgent"], ["conflicting", "digest"]] as const)("PR %s is %s and restart does not replay it", async (kind, priority) => {
   const f = await fixture();
   const next = pull(kind === "conflicting" ? { mergeable: false } : { state: "closed", merged_at: kind === "merged" ? "2026-10-19T01:00:00Z" : null });
   f.responses.set("repos/acme/app/pulls/7", ok(next, '"changed"'));

@@ -18,7 +18,7 @@ export type EventPolicy = {
 };
 
 const URGENT_KINDS = [
-  "INBOUND", "INBOUND_EDIT", "INBOUND_DELETE", "VISITOR", "LANE_DONE_CLAIMED", "LANE_NOT_DONE", "LANE_CLOSED", "LANE_REPORT",
+  "INBOUND", "INBOUND_EDIT", "INBOUND_DELETE", "VISITOR", "LANE_NOT_DONE", "LANE_REPORT",
   "DEAD_PANE", "UNRECOGNISED_PANE", "NO-REPORT", "NO-PROGRESS",
   "HOST_GUARD ALERT", "HOST_GUARD CLEAR", "LAUNCH_READY", "WORKING-WHILE-PAUSED",
   "WAIT_DONE", "WAIT_TIMEOUT", "SUPERVISOR_STUCK", "LANE_QUOTA_STALL", "ACK_MISSING", "UNHANDLED",
@@ -27,7 +27,9 @@ const URGENT_KINDS = [
   "LEAD_EMERGENCY_APPROVAL", "TASK_STALLED", "OPERATION_AMBIGUOUS", "OPERATION_FAILED",
   // CI follow-up: a lane that did not confirm its message in time, and a conflict no merge lane could take.
   "LANE_MESSAGE_UNCONFIRMED", "CI_CONFLICT",
-  "GH_PR * merged", "GH_PR * closed", "GH_PR * review", "GH_PR * comment",
+  // A merged lane PR whose merge the supervisor could not read back.
+  "MERGE_UNVERIFIED",
+  "GH_PR * closed", "GH_PR * review", "GH_PR * comment",
   "GH_ISSUE * opened", "GH_ISSUE * reopened",
   // A move into brief/blocked changes what the lead may do now; ok/hold-lanes changes stay digest.
   "CLAUDE_QUOTA brief", "CLAUDE_QUOTA blocked",
@@ -35,9 +37,14 @@ const URGENT_KINDS = [
 
 /**
  * Kinds that stay digest whatever `default` says. The lane hears about its PR first (CI follow-up messages it and merges
- * or opens a merge lane), and a lane's milestone and progress reports wait for the next urgent delivery.
+ * or opens a merge lane), and a lane's milestone and progress reports wait for the next urgent delivery. The supervisor
+ * settles the rest itself: a done claim is re-checked live and closed (or objected to, LANE_NOT_DONE, which is urgent),
+ * and a merged lane PR has its merge read back (MERGE_VERIFIED, or urgent MERGE_UNVERIFIED) and its lane closed.
  */
-const DIGEST_KINDS = ["GH_PR * checks_failing", "GH_PR * conflicting", "LANE_REPORT * milestone", "LANE_REPORT * progress"] as const;
+const DIGEST_KINDS = [
+  "GH_PR * checks_failing", "GH_PR * conflicting", "GH_PR * merged", "LANE_REPORT * milestone", "LANE_REPORT * progress",
+  "LANE_DONE_CLAIMED", "LANE_CLOSED", "MERGE_VERIFIED",
+] as const;
 
 /** The actionable kinds wake the lead, every other line is digest. */
 export const DEFAULT_EVENT_POLICY: EventPolicy = {

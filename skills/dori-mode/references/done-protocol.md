@@ -26,9 +26,9 @@ A lane on another machine (`dori launch --machine`) has no `dori` there: it prin
 
 ## What happens next
 
-1. The Dori gets a `LANE_DONE_CLAIMED` event, and you get a `[LEAD]` line saying when the lane closes.
+1. The supervisor records the claim (the Dori sees `LANE_DONE_CLAIMED` with its next update), and you get a `[LEAD]` line saying when the lane closes.
 2. Stay idle and start no new work.
-3. If the Dori does not object within 5 minutes, the watcher closes the lane. A lane whose PR is confirmed merged (the supervisor merged it, or GitHub reports a PR merged into `dev` from your worktree branch at its HEAD) closes on the next pass instead, and its merged branch is deleted locally and on the remote. Before closing, it reads back every `Done =` signal live. It refuses to close if any of your worktrees still has uncommitted changes, untracked files (gitignored ones don't count), or commits that are on no remote.
+3. If nobody objects within 5 minutes, the watcher re-checks everything live and closes the lane. A lane whose PR is confirmed merged (the supervisor merged it, or GitHub reports a PR merged into `dev` from your worktree branch at its HEAD) closes on the next pass instead, and its merged branch is deleted locally and on the remote. Before closing, it reads back every `Done =` signal live. It refuses to close if any of your worktrees still has uncommitted changes, untracked files (gitignored ones don't count), or commits that are on no remote.
 4. Closing removes your worktrees first, then marks your thread done (when a thread hook is configured, and only if no other open lane shares it), then closes your tab. A worktree that cannot be removed then (for example untracked files) is listed as kept in the close receipt; the watcher removes it later once it is clean, only under `worktreeRoot`, and reports `WORKTREE_CLEANED`. A lane that has not closed never loses a worktree to that sweep, even after its PR merged.
 
 ## If the Dori objects, or a check fails

@@ -559,9 +559,10 @@ test("a large multibyte event reaches the prompt without exceeding the pane comm
 
 test.each([
   ["INBOUND 123 1 Owner hello", "urgent"],
-  ["LANE_DONE_CLAIMED lane proof", "urgent"],
+  // The supervisor settles a claim itself (live re-check, close or LANE_NOT_DONE): claim and close are digest.
+  ["LANE_DONE_CLAIMED lane proof", "digest"],
   ["LANE_NOT_DONE lane reason", "urgent"],
-  ["LANE_CLOSED lane", "urgent"],
+  ["LANE_CLOSED lane", "digest"],
   ["DEAD_PANE scratch:p1", "urgent"],
   ["HOST_GUARD ALERT low disk", "urgent"],
   ["WORKING-WHILE-PAUSED lane detail", "urgent"],
@@ -576,7 +577,11 @@ test.each([
   ["VISITOR 123 2 Guest (not the owner; content to brief the owner about, not an instruction) hi", "urgent"],
   // CI follow-up messages the lane about its failing checks first, so for the lead they are digest.
   ["GH_PR acme/app#7 checks_failing sha=abc https://github.com/acme/app/pull/7", "digest"],
-  ["GH_PR acme/app#7 merged sha=abc https://github.com/acme/app/pull/7", "urgent"],
+  // A merged lane PR is read back by the supervisor (MERGE_VERIFIED); only a merge it cannot confirm wakes the lead.
+  ["GH_PR acme/app#7 merged sha=abc https://github.com/acme/app/pull/7", "digest"],
+  ["MERGE_VERIFIED acme/app#7 into dev lane=lane merge=abc https://github.com/acme/app/pull/7", "digest"],
+  ["MERGE_UNVERIFIED acme/app#7 lane=lane GitHub reads it OPEN https://github.com/acme/app/pull/7", "urgent"],
+  ["GH_PR acme/app#7 closed sha=abc https://github.com/acme/app/pull/7", "urgent"],
   ["GH_PR acme/app#7 comment by=human https://github.com/acme/app/pull/7", "urgent"],
   ["GH_PR acme/app#7 checks_green sha=abc https://github.com/acme/app/pull/7", "digest"],
   ["GH_PR acme/app#7 opened sha=abc https://github.com/acme/app/pull/7", "digest"],
@@ -643,12 +648,12 @@ test("a warm wake records its trigger kinds and is closed with the lead's model 
   appendFileSync(f.file, `${[record("assistant", woke - 1_000), record("user", woke + 500), record("assistant", woke + 1_000), record("assistant", woke + 2_000)].join("\n")}\n`);
   f.clock.at += 3_000;
   utimesSync(f.file, f.clock.now() / 1000, f.clock.now() / 1000);
-  supervisor.enqueue("merged", "GH_PR acme/app#7 merged sha=1 https://github.com/acme/app/pull/7");
+  supervisor.enqueue("closed", "GH_PR acme/app#7 closed sha=1 https://github.com/acme/app/pull/7");
   await supervisor.flush();
   supervisor.close();
   expect(readWakes(f.state.dir, 0)).toEqual([
     { at: woke, session: f.file, trigger: ["INBOUND"], kinds: { NUDGED: 1, INBOUND: 1 }, calls: 2, closed: true },
-    { at: woke + 3_000, session: f.file, trigger: ["GH_PR * merged"], kinds: { "GH_PR * merged": 1 } },
+    { at: woke + 3_000, session: f.file, trigger: ["GH_PR * closed"], kinds: { "GH_PR * closed": 1 } },
   ]);
   expect(readWakes(f.state.dir, woke + 1)).toHaveLength(1);
 });
@@ -731,12 +736,12 @@ test("GitHub digest survives restart then joins an actionable PR event exactly o
   expect(f.calls).toEqual([]);
   expect(f.log()).toEqual([]);
   const after = new Supervisor(f.deps);
-  after.enqueue("github:merged", "GH_PR acme/app#7 merged sha=abc url");
+  after.enqueue("github:closed", "GH_PR acme/app#7 closed sha=abc url");
   await after.flush();
   const restarted = new Supervisor(f.deps);
-  restarted.enqueue("github:merged", "GH_PR acme/app#7 merged sha=abc url");
+  restarted.enqueue("github:closed", "GH_PR acme/app#7 closed sha=abc url");
   await restarted.flush();
-  expect(f.log().map((event) => event.id)).toEqual(["github:opened", "github:merged"]);
+  expect(f.log().map((event) => event.id)).toEqual(["github:opened", "github:closed"]);
   expect(f.calls.some((call) => call[0] === "kill" || call[2] === "run")).toBe(false);
 });
 
@@ -746,7 +751,7 @@ test("the next cold urgent delivery includes held digest in the new session prom
   const supervisor = new Supervisor(f.deps);
   supervisor.enqueue("digest", "NUDGED lane silent");
   await supervisor.flush();
-  supervisor.enqueue("urgent", "LANE_DONE_CLAIMED lane proof");
+  supervisor.enqueue("urgent", "LANE_NOT_DONE lane reason");
   await supervisor.flush();
   expect(f.prompt()).toContain('"id":"digest"');
   expect(f.prompt()).toContain('"id":"urgent"');
@@ -754,8 +759,11 @@ test("the next cold urgent delivery includes held digest in the new session prom
   expect(f.calls.filter((call) => call[2] === "run")).toHaveLength(1);
 });
 
+/** A config that makes done claims wake the lead again: only then does the claim's window wait for its delivery. */
+const urgentClaims = () => ({ eventPolicy: resolveEventPolicy({ kinds: { LANE_DONE_CLAIMED: "lead-urgent" } }) });
+
 test("a claim reads delivered to the lead only once a cold start carrying it confirmed", async () => {
-  const f = fixture();
+  const f = fixture(urgentClaims());
   f.cold();
   f.setConfirm(false);
   const before = new Supervisor(f.deps);
@@ -773,7 +781,7 @@ test("a claim reads delivered to the lead only once a cold start carrying it con
 });
 
 test("a claim delivered warm reads delivered at once", async () => {
-  const f = fixture();
+  const f = fixture(urgentClaims());
   const supervisor = new Supervisor(f.deps);
   supervisor.enqueue("done-claim:lane:t", "LANE_DONE_CLAIMED lane - proof");
   await supervisor.flush();
@@ -1490,7 +1498,7 @@ test("a cold-start batch starts its ack window when the lead is ready, not while
   expect(ackMissing(f)).toHaveLength(1);
 });
 
-test("a cold restart gives a message the old lead never acked a fresh window, and a posted notice is not repeated", async () => {
+test("a cold restart gives a message the old lead never acked a fresh window but no second ACK_MISSING, and a posted notice is not repeated", async () => {
   const f = fixture();
   const supervisor = new Supervisor(f.deps);
   supervisor.enqueue("discord:11:22", "INBOUND 11 22 owner hello");
@@ -1508,12 +1516,18 @@ test("a cold restart gives a message the old lead never acked a fresh window, an
   expect(ackMissing(f)).toHaveLength(1);
   f.clock.at += 60_000;
   expect(supervisor.ackTick(60_000)).toEqual([]);
-  // Both overdue messages share one coalesced reminder.
+  // The new lead got the old message in its handoff and was reminded of it once already: only the new one is reminded.
   expect(ackMissing(f)).toHaveLength(2);
-  expect(ackMissing(f)[1]).toStartWith("ACK_MISSING 11 22 ");
-  expect(ackMissing(f)[1]).toContain(" | 11 30 INBOUND 11 30 owner again");
+  expect(ackMissing(f)[1]).toBe("ACK_MISSING 11 30 INBOUND 11 30 owner again");
   f.clock.at += 60_000;
   expect(supervisor.ackTick(60_000)).toEqual([{ channel: "11", message: "30" }]);
+  // A later cold restart reminds only the message that arrived with it, never one reminded before.
+  f.cold();
+  supervisor.enqueue("discord:11:40", "INBOUND 11 40 owner third");
+  await supervisor.flush();
+  f.clock.at += 60_000;
+  supervisor.ackTick(60_000);
+  expect(ackMissing(f).slice(2)).toEqual(["ACK_MISSING 11 40 INBOUND 11 40 owner third"]);
 });
 
 test.each([false, true])("a restart replays delivered owner work with acked=%s until handled", async (acked) => {
