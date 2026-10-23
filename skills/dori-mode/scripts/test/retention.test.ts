@@ -140,8 +140,8 @@ test("a version 1 database migrates to the current version and keeps its journal
   // When the current code opens it.
   const store = f.db();
   // Then it is at the current version with every table, and the journal is unchanged.
-  expect(SCHEMA_VERSION).toBe(3);
-  expect(store.meta("schema_version")).toBe("3");
+  expect(SCHEMA_VERSION).toBe(4);
+  expect(store.meta("schema_version")).toBe("4");
   expect(Object.keys(store.counts())).toEqual(expect.arrayContaining(["event_tombstones", "gh_repos", "gh_prs", "gh_issues", "gh_cache", "lead_wakes"]));
   expect(store.read(false).events).toEqual([{ id: "report:a", line: "LANE_REPORT alpha", at: T0 }]);
 });

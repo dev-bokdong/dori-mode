@@ -36,6 +36,7 @@ import { LeadRestartError, requestLeadRestart } from "./lead-restart.ts";
 import { approveEmergency, clearEmergencyApproval, emergencyApprovedAt } from "./emergency.ts";
 import { recoverLanes } from "./recover.ts";
 import { ack, AckError } from "./ack.ts";
+import { InboxError, take, takeOutput } from "./inbox.ts";
 import { checkMemory, MemoryCheckError, needsAction, renderMemoryReport } from "./memory-check.ts";
 import { StoreError } from "./store.ts";
 import { openOperations, operationLine, type OperationState, settleOperation } from "./operations.ts";
@@ -100,6 +101,8 @@ const USAGE = `dori <command> [options]
   report <key> <progress|question|blocked|milestone|done> --text T [--evidence E]
                                        a lane's structured report (own key only): one row the supervisor routes
   report ack <id>                      inside a lane: confirm a supervisor message to this lane by its ID (CI follow-up)
+  inbox take [--max-bytes N] [--peek]  the lead's read path: delivered events past the take cursor as id<TAB>line, whole lines
+                                       up to N bytes (INBOX_MORE <lines> <bytes> when more wait, INBOX_EMPTY when none); writes a take receipt
   ack <channel> <messageId> [...]      the lead's read receipt (one <channel> <messageId> pair per message) on a Discord owner message: hourglass off, eyes on, ack recorded for the supervisor
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
@@ -179,7 +182,7 @@ const ownKey = async (command: string, k: string | undefined): Promise<string | 
 };
 
 /** Lead-only commands: a lane (DORI_LANE_KEY or its pane) may not run them. */
-const LEAD_ONLY = new Set(["ack", "handled", "launch", "adopt", "hold", "lead-restart", "lead-emergency", "store", "ops", "source", "schedule"]);
+const LEAD_ONLY = new Set(["ack", "handled", "inbox", "launch", "adopt", "hold", "lead-restart", "lead-emergency", "store", "ops", "source", "schedule"]);
 if (LEAD_ONLY.has(command)) {
   const caller = await callerLane(deps);
   if (caller !== undefined) die(`LANE_PERMISSION_DENIED lane ${caller} may not run ${command}; it is lead-only`);
@@ -549,6 +552,20 @@ try {
         if (e instanceof MemoryCheckError) die(`MEMORY_CHECK_ERROR ${e.message}`, 2);
         throw e;
       }
+    }
+    case "inbox": {
+      const parsed = parseArgs({ args: rest, allowPositionals: true, options: { "max-bytes": { type: "string" }, peek: { type: "boolean" } } });
+      const raw = parsed.values["max-bytes"];
+      const maxBytes = raw === undefined ? config.delivery.push.takeMaxBytes : Number(raw);
+      if (parsed.positionals.join(" ") !== "take" || !Number.isSafeInteger(maxBytes) || maxBytes < 1) die("usage: dori inbox take [--max-bytes N (positive integer)] [--peek]");
+      try {
+        const result = take(config.stateDir, { maxBytes, peek: parsed.values.peek === true, now: realClock.now(), session: process.env.PI_SESSION_ID });
+        for (const line of takeOutput(result)) console.log(line);
+      } catch (e) {
+        if (e instanceof InboxError) die(e.message, 2);
+        throw e;
+      }
+      break;
     }
     case "ack": {
       const parsed = parseArgs({ args: rest, allowPositionals: true, options: { tasks: { type: "string" } } });
