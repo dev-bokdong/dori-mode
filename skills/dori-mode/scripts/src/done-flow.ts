@@ -15,7 +15,7 @@ import { BRANCH_DELETE, type BranchPlan, deleteBranch, planBranchCleanup, readBi
 import { otherOpenLanesOnThread } from "./routing.ts";
 import type { Discord } from "./messenger/discord.ts";
 import { type Platform, resolveTarget, type Target } from "./messenger/target.ts";
-import { eventClass, forLead } from "./event-policy.ts";
+import { eventClass } from "./event-policy.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -43,6 +43,14 @@ const windowMs = (deps: FlowDeps): number => deps.config.closeAfterMin * 60_000;
 /** A lane that claims and closes with no lead wake: its brief declared `autoClose: machine`. */
 const machineClose = (lane: Lane): boolean => lane.autoClose === "machine";
 
+/**
+ * Whether the claim's window waits for the lead to receive it: only when the policy makes LANE_DONE_CLAIMED wake the
+ * lead. By default it is digest: the supervisor settles the claim itself (live re-check, then close or LANE_NOT_DONE),
+ * so the window runs from the hand-over.
+ */
+const claimWaitsForLead = (deps: FlowDeps, lane: Lane): boolean =>
+  !machineClose(lane) && eventClass(`LANE_DONE_CLAIMED ${lane.key}`, deps.config.eventPolicy) === "lead-urgent";
+
 /** The journal id of a claim's announcement: stable, so a repeated announcement after a crash is the same event. */
 export const claimEventId = (key: string, claimAt: string): string => `done-claim:${key}:${claimAt}`;
 
@@ -52,9 +60,9 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string): P
   await deps.registry.update(lane.key, (current) => withStatus(current ?? lane, "done-claimed", evidence, at, { claim: { at, evidence, emitted: false } }));
   if (lane.pane) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
-    const when = !machineClose(lane)
+    const when = claimWaitsForLead(deps, lane)
       ? `${deps.config.closeAfterMin} minutes after the lead receives this claim`
-      : `at ${closesAt}Z (${deps.config.closeAfterMin} minutes)`;
+      : `at ${closesAt}Z (${deps.config.closeAfterMin} minutes) once its Done signals read back live`;
     await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically ${when} unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`);
   }
   return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}`;
@@ -527,9 +535,9 @@ export const finishedReason = async (deps: FlowDeps, lane: Lane): Promise<string
 const windowStart = async (deps: FlowDeps, lane: Lane, claim: NonNullable<Lane["claim"]>): Promise<number | undefined> => {
   if (!claim.event) return Date.parse(claim.at);
   if (claim.deliveredAt) return Date.parse(claim.deliveredAt);
-  // An event the policy keeps from the lead (owner-only, engine-only) is never delivered to it: handing it over counts.
-  const reachesLead = forLead(eventClass(`LANE_DONE_CLAIMED ${lane.key}`, deps.config.eventPolicy));
-  if (reachesLead && deps.leadDelivered && !deps.leadDelivered(claim.event)) return undefined;
+  // Only a claim that wakes the lead waits for its delivery; a digest one (the default) or one the policy keeps from
+  // the lead is settled by the supervisor, so handing it over counts.
+  if (claimWaitsForLead(deps, lane) && deps.leadDelivered && !deps.leadDelivered(claim.event)) return undefined;
   const at = iso(deps.clock);
   await deps.registry.patch(lane.key, (current) => (current.claim?.at === claim.at ? { claim: { ...current.claim, deliveredAt: at } } : undefined));
   return Date.parse(at);

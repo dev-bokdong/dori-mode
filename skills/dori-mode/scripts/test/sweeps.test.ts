@@ -110,13 +110,16 @@ test("a posted [REPORT] line is saved: the same line on later ticks is stale, lo
   expect(world.calls.filter((c) => c[0] === "notify")).toHaveLength(1);
 });
 
-test("a quiet lane with no [REPORT] line logs NO-REPORT once, not on every tick", async () => {
+test("a quiet remote lane with no [REPORT] line logs NO-REPORT once, not on every tick; a local lane never does", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
-  await deps(T0).registry.write({ ...working, lastNudgeAt: T0 + MIN });
+  await deps(T0).registry.write({ ...working, machine: "m1", lastNudgeAt: T0 + MIN });
   world.screen = "just thinking\n❯ ";
   expect((await freshnessTick(deps(T0 + 21 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["no-report"]);
   expect(await freshnessTick(deps(T0 + 26 * MIN), "/home/test")).toEqual([]);
   expect(await freshnessTick(deps(T0 + 31 * MIN), "/home/test")).toEqual([]);
+  // A local lane reports with dori report or into the lead's pane: its own pane having none is expected.
+  await deps(T0).registry.write({ ...working, key: "local-lane", pane: "w:p8", lastNudgeAt: T0 + MIN });
+  expect((await freshnessTick(deps(T0 + 36 * MIN), "/home/test")).filter((a) => a.lane === "local-lane")).toEqual([]);
 });
 
 test("launch reports STARTUP_OK only on a ready agent status after the screen scan; a blank pane is unconfirmed, a known failure is an error", async () => {

@@ -350,6 +350,48 @@ test("an issue is not closed for a PR merged into main, nor commented on when so
   expect(open[1]?.ops.get("demo-lane/close-issue/acme/app#5@acme/app#7")?.state).toBe("verified");
 });
 
+const mergedSeven = [{ repo: "acme/app", number: 7, url: "https://github.com/acme/app/pull/7" }];
+const views = () => world.calls.filter((c) => c[0] === "gh" && c[2] === "view").length;
+
+test("a merged PR of an open lane is read back once as digest MERGE_VERIFIED with its merge SHA; later polls and a restart read nothing", async () => {
+  gh.view = greenView({ state: "MERGED", mergeCommit: { oid: "m3rge5ha" } });
+  const ci = follow();
+  await ci.tick([], emit, mergedSeven);
+  await ci.tick([], emit, mergedSeven);
+  await follow().tick([], emit, mergedSeven);
+  expect(events.filter(([, l]) => l.startsWith("MERGE_"))).toEqual([
+    ["merge-verified:acme/app#7", "MERGE_VERIFIED acme/app#7 into dev lane=demo-lane merge=m3rge5ha https://github.com/acme/app/pull/7"],
+  ]);
+  expect(views()).toBe(1);
+  expect(eventClass(lines("MERGE_VERIFIED")[0] ?? "", deps.config.eventPolicy)).toBe("lead-digest");
+  expect(eventClass("GH_PR acme/app#7 merged sha=x u", deps.config.eventPolicy)).toBe("lead-digest");
+});
+
+test("a PR the supervisor merged itself (CI_MERGED) is not read back again, and a PR of no open lane is never read", async () => {
+  const ci = follow();
+  await ci.tick([pull({ checks: "green" })], emit);
+  expect(lines("CI_MERGED")).toHaveLength(1);
+  const before = views();
+  await ci.tick([], emit, [...mergedSeven, { repo: "acme/app", number: 99, url: "https://github.com/acme/app/pull/99", branch: "other" }]);
+  expect(views()).toBe(before);
+  expect(lines("MERGE_")).toEqual([]);
+});
+
+test("a merged lane PR that cannot be read back wakes the lead once as MERGE_UNVERIFIED after MERGE_ATTEMPTS polls", async () => {
+  gh.viewCode = 1;
+  const ci = follow();
+  await ci.tick([], emit, mergedSeven);
+  await ci.tick([], emit, mergedSeven);
+  expect(lines("MERGE_")).toEqual([]);
+  await ci.tick([], emit, mergedSeven);
+  await ci.tick([], emit, mergedSeven);
+  expect(events.filter(([, l]) => l.startsWith("MERGE_")).map(([, l]) => l)).toEqual([
+    expect.stringContaining("MERGE_UNVERIFIED acme/app#7 lane=demo-lane merge could not be read back after 3 tries: gh pr view acme/app#7 exit 1: HTTP 502"),
+  ]);
+  expect(views()).toBe(3);
+  expect(eventClass(lines("MERGE_UNVERIFIED")[0] ?? "", deps.config.eventPolicy)).toBe("lead-urgent");
+});
+
 test("GH_PR checks_failing and conflicting are digest by default, unless eventPolicy names them", async () => {
   const file = join(state.dir, "config.json");
   writeFileSync(file, JSON.stringify({}));

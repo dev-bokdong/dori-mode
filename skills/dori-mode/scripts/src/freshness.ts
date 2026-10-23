@@ -119,7 +119,10 @@ export const freshnessTick = async (deps: FlowDeps, home: string, view: SweepVie
       else if (report === current.lastPostedReport) hold = { kind: "stale-report", detail: "the last [REPORT] line was already posted" };
       if (hold) {
         const note = `${hold.kind}|${hold.detail}|${report ?? ""}`;
-        if (note !== current.lastFreshnessNote) acts.push({ kind: hold.kind, lane: lane.key, detail: hold.detail });
+        // Only a remote lane reports by printing [REPORT] in its own pane. A local lane reports with dori report (or, on
+        // the older footer, into the lead's pane), so its pane having none is expected and not worth a line.
+        const expected = hold.kind === "no-report" && !lane.machine;
+        if (note !== current.lastFreshnessNote && !expected) acts.push({ kind: hold.kind, lane: lane.key, detail: hold.detail });
         await save({ lastSeenReport, lastFreshnessNote: note });
         continue;
       }

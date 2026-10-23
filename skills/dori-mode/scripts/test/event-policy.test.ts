@@ -37,10 +37,12 @@ const corpus = [
   "OWNER_QUARANTINED 2 1:2,3", "COMPUTE_READY", "", " INBOUND leading space", "inbound lower case", "NEW_SOURCE_KIND something",
 ];
 
-test("the default table classifies every line as the hard-coded list did, except the PR states CI follow-up hands to the lane", () => {
+test("the default table classifies every line as the hard-coded list did, except the events the supervisor settles itself", () => {
   const differ = corpus.filter((line) => eventPriority(line) !== legacyPriority(line));
-  // CI follow-up messages the lane about failing checks and conflicts first, so for the lead they are digest.
-  expect(differ).toEqual(corpus.filter((line) => /^GH_PR \S+ (checks_failing|conflicting)(?: |$)/.test(line)));
+  // CI follow-up messages the lane about failing checks and conflicts first; a merged PR is read back and a done claim
+  // re-checked and closed by the supervisor. For the lead all of these are digest.
+  expect(differ).toEqual(corpus.filter((line) =>
+    /^GH_PR \S+ (checks_failing|conflicting|merged)(?: |$)/.test(line) || /^(LANE_DONE_CLAIMED|LANE_CLOSED)(?: |$)/.test(line)));
   expect(differ.every((line) => eventPriority(line) === "digest")).toBe(true);
   expect(corpus.filter((line) => eventPriority(line) === "urgent").length).toBeGreaterThan(LEGACY_URGENT.length);
 });

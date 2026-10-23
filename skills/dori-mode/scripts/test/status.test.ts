@@ -215,7 +215,8 @@ test("status shows per-kind event counts over 24h, the wakes each kind triggered
   expect(s.events).toMatchObject({ hours: 24, wakes: 3, measured: 2, calls: 13 });
   expect(s.events.kinds).toEqual([
     { kind: "INBOUND", cls: "lead-urgent", events: 2, wakes: 2, measured: 2, calls: 13 },
-    { kind: "GH_PR * merged", cls: "lead-urgent", events: 1, wakes: 1, measured: 1, calls: 9 },
+    // The class is the current policy's: a merged PR is digest now, though it woke the lead when this wake was recorded.
+    { kind: "GH_PR * merged", cls: "lead-digest", events: 1, wakes: 1, measured: 1, calls: 9 },
     { kind: "(restart)", events: 0, wakes: 1, measured: 0, calls: 0 },
     { kind: "NUDGED", cls: "lead-digest", events: 3, wakes: 0, measured: 0, calls: 0 },
   ]);
