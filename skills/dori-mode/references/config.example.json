@@ -1,0 +1,116 @@
+{
+  "stateDir": "~/.dori/state",
+  "laneWorkspace": "lanes",
+  "workspaces": [
+    "lanes"
+  ],
+  "ignorePanes": [],
+  "leadPane": "<your herdr pane id, from: herdr pane current>",
+  "defaultCwd": "~/code/my-project",
+  "agentCommand": [
+    "omo",
+    "--model",
+    "{model}",
+    "{prompt}"
+  ],
+  "defaultModel": "anthropic-subscription/claude-opus-5-5",
+  "launchKeywords": "ulw set goal and work",
+  "leadArgs": [],
+  "leadPrimaryRetryMin": 15,
+  "leadPrimaryReturnChecks": 2,
+  "leadQuotaBusySwitchMin": 10,
+  "leadStuckRestartMin": 30,
+  "leadUnreadRestartMin": 5,
+  "leadEmergencyModels": [],
+  "quotaGate": {
+    "holdLanesHeadroomPct": 50,
+    "briefHeadroomPct": 25,
+    "pollMin": 5
+  },
+  "quotaCheck": [
+    "omo",
+    "auth",
+    "check",
+    "--provider",
+    "{provider}",
+    "--json",
+    "--no-refresh"
+  ],
+  "cacheTtlMin": 5,
+  "leadContextCapTokens": 150000,
+  "leadContextHardCapTokens": 300000,
+  "discordChannels": [
+    "123456789012345678"
+  ],
+  "discordSafetyPollSeconds": 300,
+  "discordFirstSeenLimit": 100,
+  "githubIssueAuthors": [
+    "your-github-login"
+  ],
+  "discord": {
+    "applicationId": "1100000000000000001",
+    "guildId": "1100000000000000002",
+    "ownerId": "<owner Discord user id>"
+  },
+  "sessionsDir": "~/.omo/agent/sessions",
+  "nudgeAfterMin": 15,
+  "postAfterMin": 20,
+  "closeAfterMin": 5,
+  "waitMaxFailures": 30,
+  "worktreeRoot": "/data/repos/worktrees",
+  "progressTemplate": "{todo}",
+  "digestMaxDelayMin": 60,
+  "ownerDelayNotice": "Got your message. The lead session is not taking it yet; it stays queued and will be answered as soon as the lead is back.",
+  "ackTimeoutSec": 60,
+  "ackMissingNotice": "Your message reached the lead session, but it has not confirmed reading it yet. It has been reminded and will answer here.",
+  "handledTimeoutMin": 30,
+  "unhandledNotice": "Your message was read, but not all of its tasks have been linked to work or a reply. The lead has been reminded to handle it.",
+  "heavySlots": 1,
+  "heavyMaxLoad": 80,
+  "deadPanePatterns": [
+    "has stopped",
+    "no suitable jobs"
+  ],
+  "guard": {
+    "loadAlert": 150,
+    "loadOk": 80,
+    "memFreeMinPct": 20,
+    "diskFreeMinGb": 50,
+    "panesMax": 20
+  },
+  "runTimeoutMs": 60000,
+  "sweepMachineDeadlineMs": 20000,
+  "store": "json",
+  "ciConfirmMin": 20,
+  "ciMergeBase": "dev",
+  "diskGuardPath": "",
+  "memoryCheck": {
+    "repo": "",
+    "maxKb": 15
+  },
+  "hooks": {
+    "threadReply": [
+      "my-messenger",
+      "reply",
+      "--thread",
+      "{thread}",
+      "--text",
+      "{text}"
+    ],
+    "threadDone": [
+      "my-messenger",
+      "set-status",
+      "--thread",
+      "{thread}",
+      "--status",
+      "done",
+      "--note",
+      "{text}"
+    ],
+    "transcribe": [
+      "my-stt",
+      "--file",
+      "{file}"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+[Unit]
+Description=Dori supervisor (Discord presence, slash commands, inbound, sweeps, lead lifecycle)
+Wants=herdr-server.service
+After=herdr-server.service
+# Crash-looping (a full disk, a broken config) stops after 5 starts in 10 minutes and alerts the owner once.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure=dori-failure-notify@%n.service
+
+[Service]
+# dori supervise sends READY=1 once its loop runs and WATCHDOG=1 on every loop pass (through systemd-notify).
+# Two separate deadlines: TimeoutStartSec covers ExecStartPre plus startup up to READY=1; WatchdogSec covers the
+# running loop, which withholds WATCHDOG=1 after 15 min without progress. A start that hangs is SIGKILLed, not sent
+# SIGTERM: a blocked startup cannot run its SIGTERM handler, and TimeoutStopSec would delay the restart by 90 s more.
+Type=notify
+NotifyAccess=all
+WatchdogSec=300
+TimeoutStartSec=300
+TimeoutStartFailureMode=kill
+WorkingDirectory={{WORK_DIR}}
+EnvironmentFile={{ENV_FILE}}
+Environment=DORI_CONFIG={{CONFIG}}
+Environment=PATH={{PATH}}
+Environment=LANG=C.UTF-8
+ExecStartPre={{BOOT_PREP}}
+ExecStart={{DORI_BIN}} supervise
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

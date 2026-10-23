@@ -1,0 +1,19 @@
+[Unit]
+Description=herdr headless server (Dori lead and lanes live here)
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure=dori-failure-notify@%n.service
+
+[Service]
+Type=simple
+WorkingDirectory={{HOME}}
+Environment=PATH={{PATH}}
+Environment=SHELL={{SHELL}}
+Environment=LANG=C.UTF-8
+Environment=TERM=xterm-256color
+ExecStart={{HERDR_BIN}} server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: skills/dori-mode/scripts
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  # The suite on each supervisor journal store, as parallel jobs with parallel test workers. retention.test.ts picks
+  # its store itself and holds the ~100 s 30-day load test, so it runs once, in its own job.
+  test:
+    name: test (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: json
+            store: json
+            files: --path-ignore-patterns=test/retention.test.ts
+          - suite: sqlite
+            store: sqlite
+            files: --path-ignore-patterns=test/retention.test.ts
+          - suite: retention
+            store: json
+            files: test/retention.test.ts
+    env:
+      DORI_TEST_STORE: ${{ matrix.store }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test --parallel ${{ matrix.files }}

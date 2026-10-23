@@ -1,0 +1,60 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Tip: OmO -p "question" answers without the TUI, and piped stdin is merged into the prompt.
+ ↳ Want the full story on any tip? Ask about it — the give-me-tips skill has the tour.
+
+ Todo
+ Brief
+ [•] Read lane brief dori-lean.md in full
+ [ ] Execute brief steps and verify
+ [ ] Report per brief footer
+── • Running eval (3s • esc to interrupt) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/.dori/src • main • CH92.2% • $0.000 • 74K/1M (7.4%) (auto)                           (anthropic-subscription@login-2) claude-sonnet-5-5 • effort medium (shift+tab)
+(😺 OmO Native by Q Kim) Pursuing goal (17s) mem:src-ae9b7809 1m ago

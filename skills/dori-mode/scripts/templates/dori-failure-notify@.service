@@ -1,0 +1,11 @@
+[Unit]
+Description=Tell the Dori owner that %i failed
+
+[Service]
+Type=oneshot
+EnvironmentFile=-{{ENV_FILE}}
+Environment=DORI_CONFIG={{CONFIG}}
+Environment=PATH={{PATH}}
+Environment=LANG=C.UTF-8
+ExecStart={{FAILURE_NOTIFY}} %i
+TimeoutStartSec=120
