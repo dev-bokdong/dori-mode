@@ -9,7 +9,9 @@ import { launchLane } from "./launch.ts";
 import {
   type LaneMessage, type LaneMessageStore, OPEN_MESSAGE_STATES, openLaneMessages, queueLaneMessage, updateLaneMessage,
 } from "./lane-messages.ts";
-import { type Observed, type Operation, operationId, type OperationSpec, type OperationStore, openOperations, perform, plan, type ReadBack, reconcile } from "./operations.ts";
+import {
+  FINAL_STATES, type Observed, type Operation, operationId, type OperationSpec, type OperationStore, openOperations, perform, plan, type ReadBack, reconcile, settleOperation,
+} from "./operations.ts";
 import { laneRunner, listPanes, type Pane } from "./panes.ts";
 import { LANE_KEY, type Lane, statusOf } from "./registry.ts";
 import { canLaunch } from "./routing.ts";
@@ -25,6 +27,9 @@ import { canLaunch } from "./routing.ts";
  *   for green and merges; when none can be launched, the lead hears CI_CONFLICT.
  * - a lane bound to a GitHub issue (Lane.ghIssue): once its PR is confirmed merged into `ciMergeBase`, the issue is
  *   closed with a comment (a `close-issue` operation planned while the PR is open, so a closed lane still settles it).
+ * - a merged PR of an open lane that the supervisor did not merge itself: its merge is read back once (a `merge-verify`
+ *   operation) as digest MERGE_VERIFIED with the merge SHA, or urgent MERGE_UNVERIFIED when it cannot be confirmed.
+ *   The watcher then closes a done-claimed lane at once (done-flow.ts mergeConfirmed), with its worktree and branch.
  * Each merge and launch is an operation (operations.ts), keyed by PR and head SHA, so a restart never repeats it. The
  * lanes keep waiting on their own CI; nothing here replaces that wait.
  */
@@ -63,7 +68,9 @@ export const rebaseText = (pull: OpenPull, base: string, id: string): string =>
   `[LEAD] ${pull.repo}#${pull.number} conflicts with ${base} at ${short(pull.sha)} (${pull.url}). Your lane is live, so no merge lane is started: rebase your branch onto origin/${base} yourself, resolve every conflict keeping the intent of both sides, run the tests, push (--force-with-lease, your own branch only) and keep your own CI wait. Confirm you got this message: dori report ack ${id}`;
 
 /** A merged PR from the last poll (GitHubEvents.mergedPulls), for closing the issue its lane was bound to. */
-export type MergedPull = Pick<OpenPull, "repo" | "number" | "url">;
+export type MergedPull = Pick<OpenPull, "repo" | "number" | "url"> & { readonly branch?: string };
+
+export const MERGE_VERIFY = "merge-verify";
 
 /** `owner/repo#N` (a lane's ghIssue, a close-issue target): repo and number, or undefined when it is not one. */
 export const parseIssueRef = (ref: string): { readonly repo: string; readonly number: number } | undefined => {
@@ -236,23 +243,31 @@ export class CiFollowUp {
   async tick(pulls: readonly OpenPull[], emit: CiEmit, merged: readonly MergedPull[] = []): Promise<void> {
     await this.follow(pulls, emit);
     await this.closeIssues(merged, emit);
+    await this.verifyMerges(merged, emit);
     await deliverLaneMessages(this.deps, this.ops, this.messages, emit);
   }
 
-  private async follow(pulls: readonly OpenPull[], emit: CiEmit): Promise<void> {
-    const deps = this.deps;
-    // Oldest lane first: the lane that opened the PR keeps its operations even after a merge lane joins it.
-    const lanes = (await deps.registry.open()).filter((l) => statusOf(l) !== "closed").sort((a, b) => a.openedAt.localeCompare(b.openedAt) || a.key.localeCompare(b.key));
+  /** The open lane of each PR (`repo#n`, repo lowercased): its Done signal names it, or a lane worktree has its branch. */
+  private async owners(pulls: readonly (Pick<OpenPull, "repo" | "number"> & { readonly branch?: string })[]): Promise<Map<string, Lane>> {
     const owner = new Map<string, Lane>();
+    if (!pulls.length) return owner;
+    // Oldest lane first: the lane that opened the PR keeps its operations even after a merge lane joins it.
+    const lanes = (await this.deps.registry.open()).filter((l) => statusOf(l) !== "closed").sort((a, b) => a.openedAt.localeCompare(b.openedAt) || a.key.localeCompare(b.key));
     for (const lane of lanes) {
-      for (const [repo, targets] of await githubTargets([lane], deps.run)) {
+      for (const [repo, targets] of await githubTargets([lane], this.deps.run)) {
         for (const pull of pulls) {
-          if (pull.repo.toLowerCase() !== repo || !(targets.numbers.has(pull.number) || targets.branches.has(pull.branch))) continue;
+          if (pull.repo.toLowerCase() !== repo || !(targets.numbers.has(pull.number) || (pull.branch !== undefined && targets.branches.has(pull.branch)))) continue;
           const key = `${repo}#${pull.number}`;
           if (!owner.has(key)) owner.set(key, lane);
         }
       }
     }
+    return owner;
+  }
+
+  private async follow(pulls: readonly OpenPull[], emit: CiEmit): Promise<void> {
+    const deps = this.deps;
+    const owner = await this.owners(pulls);
     const failing = new Set<string>();
     this.rebasing = new Set();
     for (const pull of pulls) {
@@ -325,6 +340,49 @@ export class CiFollowUp {
         if (done.op.state === "verified" && done.ran) emit(`ci-issue-closed:${done.op.id}`, `CI_ISSUE_CLOSED ${issueRef} lane=${row.lane} after ${pull.repo}#${pull.number} merged into ${base} merge=${sha} ${pull.url}`);
       } catch (e) {
         console.error(`CI_FOLLOW_ERROR ${row.id} ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  /**
+   * Reads back, once, the merge of every merged PR that belongs to an open lane and was not merged by the supervisor (its
+   * own merges are read back as CI_MERGED): MERGE_VERIFIED (digest) with the base and merge SHA, or MERGE_UNVERIFIED
+   * (urgent) when GitHub does not call it merged or `gh pr view` fails MERGE_ATTEMPTS polls in a row. The line is
+   * journaled before the row settles: a crash in between re-emits the same id, which the journal dedupes.
+   */
+  private async verifyMerges(merged: readonly MergedPull[], emit: CiEmit): Promise<void> {
+    const deps = this.deps;
+    const owners = await this.owners(merged);
+    for (const pull of merged) {
+      const ref = `${pull.repo}#${pull.number}`;
+      const lane = owners.get(ref.toLowerCase());
+      if (!lane) continue;
+      const spec: OperationSpec = { lane: lane.key, action: MERGE_VERIFY, target: ref };
+      const existing = this.ops.get(operationId(spec));
+      if (existing && FINAL_STATES.has(existing.state)) continue;
+      const prefix = `${ref.toLowerCase()}@`;
+      if (this.ops.list({ lane: lane.key }).some((op) => op.action === "merge" && op.state === "verified" && op.target.toLowerCase().startsWith(prefix))) continue;
+      const op = plan(this.ops, deps.clock.now(), spec);
+      let view: PrView;
+      try { view = await viewPull(deps, pull, "state,baseRefName,mergeCommit"); } catch (e) {
+        const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
+        const attempts = op.attempts + 1;
+        if (attempts < MERGE_ATTEMPTS) {
+          this.ops.put({ ...op, attempts, detail: why, updatedAt: deps.clock.now() });
+          continue;
+        }
+        emit(`merge-unverified:${ref}`, `MERGE_UNVERIFIED ${ref} lane=${lane.key} merge could not be read back after ${attempts} tries: ${why} ${pull.url}`);
+        settleOperation(this.ops, deps.clock.now(), op.id, "failed", why);
+        continue;
+      }
+      const sha = view.mergeCommit?.oid;
+      if (view.state === "MERGED" && sha) {
+        emit(`merge-verified:${ref}`, `MERGE_VERIFIED ${ref} into ${view.baseRefName ?? "unknown"} lane=${lane.key} merge=${sha} ${pull.url}`);
+        settleOperation(this.ops, deps.clock.now(), op.id, "verified", `merge ${sha}`);
+      } else {
+        const why = `GitHub reads it ${view.state ?? "unknown"}${sha ? "" : " with no merge commit"}`;
+        emit(`merge-unverified:${ref}`, `MERGE_UNVERIFIED ${ref} lane=${lane.key} ${why} ${pull.url}`);
+        settleOperation(this.ops, deps.clock.now(), op.id, "failed", why);
       }
     }
   }

@@ -44,8 +44,8 @@ test("a working lane is never nudged: its todo text is posted scrubbed, at once 
   world.screen = REAL.replace("Read lane brief dori-lean.md in full", "Fix /home/test/repo/x.ts on w3E:p1").replace("(3s", "(40s");
   expect((await freshnessTick(deps(T0 + 18 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["progress"]);
   expect(posts().at(-1)).toBe("Fix ~/repo/x.ts on (pane)");
-  // 14 minutes after the last post nothing is posted (the quiet [REPORT] check has its own say past postAfterMin).
-  expect((await freshnessTick(deps(T0 + 32 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["no-report"]);
+  // 14 minutes after the last post nothing is posted, and a local lane's pane having no [REPORT] line is no event.
+  expect(await freshnessTick(deps(T0 + 32 * MIN), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 33 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["progress"]);
   expect(posts()).toHaveLength(3);
   expect(sent(world)).toEqual([]);

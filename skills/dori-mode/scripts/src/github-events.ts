@@ -226,10 +226,10 @@ export class GitHubEvents {
   }
 
   /** The merged PRs the polls have seen, per repo (ci-follow.ts closes a lane's issue once its PR is among them). */
-  mergedPulls(): readonly { readonly repo: string; readonly number: number; readonly url: string }[] {
+  mergedPulls(): readonly { readonly repo: string; readonly number: number; readonly url: string; readonly branch: string }[] {
     return Object.entries(this.state.repos).flatMap(([repo, state]) => Object.values(state.pulls)
       .filter((p) => p.state === "merged")
-      .map((p) => ({ repo, number: p.number, url: p.url })));
+      .map((p) => ({ repo, number: p.number, url: p.url, branch: p.branch })));
   }
 
   /** Source progress only reaches disk after every event it produced is in the durable queue. */
