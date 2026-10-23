@@ -10,6 +10,7 @@ import { pendingLeadRestart } from "./lead-restart.ts";
 import { type Event, type Journal, type JournalCore, TransientSuperviseError } from "./supervise-journal.ts";
 import type { LeadLifecycle } from "./supervise-lead-lifecycle.ts";
 import { latest, type OwnerTracking } from "./supervise-owner-tracking.ts";
+import { PushDelivery } from "./supervise-push.ts";
 
 /**
  * Delivery to the lead: which events wake it (urgent) and which wait as digest, the delivery pass that hands pending
@@ -26,8 +27,11 @@ export const eventPriority = (line: string, policy: EventPolicy = DEFAULT_EVENT_
 
 export class Delivery {
   private flushing?: Promise<void>;
+  private readonly push: PushDelivery;
 
-  constructor(private readonly core: JournalCore, private readonly owners: OwnerTracking, private readonly lead: LeadLifecycle) {}
+  constructor(private readonly core: JournalCore, private readonly owners: OwnerTracking, private readonly lead: LeadLifecycle) {
+    this.push = new PushDelivery(core, lead);
+  }
 
   private get deps(): FlowDeps { return this.core.deps; }
   private get journal(): Journal { return this.core.journal; }
@@ -79,6 +83,8 @@ export class Delivery {
           }
           if (pane?.agent && (pane.agent_status === "idle" || pane.agent_status === "done")) this.owners.markReadable();
         }
+        // Everything due is in the log now: push and shadow modes make sure the lead takes it.
+        if (await this.push.tick(pending)) continue;
         return;
       }
       const pane = (await listPanes(this.deps.run)).find((p) => p.pane_id === this.deps.config.leadPane);

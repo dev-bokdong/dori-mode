@@ -19,7 +19,7 @@ import { launchQueue, launchQueueText } from "./routing.ts";
 import { approvedEpisode, clearEmergencyApproval } from "./emergency.ts";
 import type { Durability } from "./store.ts";
 import { type AwaitingAck, type Event, type Journal, type JournalCore, type OutboxItem, type Restart, SuperviseError, TransientSuperviseError } from "./supervise-journal.ts";
-import { COLD_START_EMOJI, HUNG_EMOJI, latest, type OwnerTracking, type SupervisorHooks } from "./supervise-owner-tracking.ts";
+import { COLD_START_EMOJI, HUNG_EMOJI, latest, OWNER_INBOUND, OWNER_REVISION, type OwnerTracking, type SupervisorHooks } from "./supervise-owner-tracking.ts";
 
 /**
  * The lead lifecycle: which model the lead runs on (quota switches, the exhaustion episode, the paid emergency model),
@@ -82,7 +82,7 @@ export const openToolCallSince = (file: string): number | undefined => {
 };
 
 /** omo's footer on a session paused by Esc ("Paused · N updates held · type to continue, /resume to resume"). */
-const PAUSED = /\bPaused\b.*\/resume\b/;
+export const PAUSED = /\bPaused\b.*\/resume\b/;
 
 /** The omo input line holds nothing the owner typed: typing /resume cannot submit or mangle their text. */
 const emptyInput = (screen: string): boolean => {
@@ -324,6 +324,28 @@ export class LeadLifecycle {
   }
 
   /**
+   * Push mode: true when the restart cap refuses an unread-driven restart (stuckRestart, the push ladder). Forced
+   * restarts and quota switches of the last hour count (they still run past the cap). The first refusal of each hour is
+   * logged and told to the owner once; the push step keeps re-pushing meanwhile. Tail and shadow modes never refuse.
+   */
+  capRefuses(what: string): boolean {
+    const { delivery } = this.deps.config;
+    if (delivery.mode !== "push") return false;
+    const now = this.deps.clock.now();
+    const count = this.core.forcedRestartsSince(now);
+    if (count < delivery.restartMaxPerHour) return false;
+    const hour = Math.floor(now / 3_600_000);
+    const inbox = this.journal.inbox;
+    if (inbox && inbox.capNotice !== hour) {
+      console.log(`LEAD_RESTART_CAPPED ${what}: ${count} forced restarts in the last hour (delivery.restartMaxPerHour ${delivery.restartMaxPerHour}); re-pushing instead`);
+      this.journal = { ...this.journal, inbox: { ...inbox, capNotice: hour } };
+      this.persist();
+      this.owners.announce(`lead-restart-capped:${hour}`, `The lead is not taking new events, but it was already restarted ${count} times in the last hour, so it is not restarted again for now. The supervisor keeps notifying it.`);
+    }
+    return true;
+  }
+
+  /**
    * An idle lead paused by Esc (omo holds every monitor event, so the delivery log never wakes it) with an owner message
    * unacked past the ack window is resumed: `/resume` is typed once per ack window, only into an empty input line.
    * One that stays silent is restarted by stuckRestart after leadUnreadRestartMin.
@@ -361,13 +383,17 @@ export class LeadLifecycle {
     const { config, clock, run } = this.deps;
     const limit = config.leadStuckRestartMin * 60_000;
     if (!(limit > 0)) return false;
-    const unreadLimit = config.leadUnreadRestartMin * 60_000;
+    // Push mode: the push ladder owns idle leads, and one tool call is clocked by push.escalateMin (supervise-push.ts).
+    const push = config.delivery.mode === "push";
+    const unreadLimit = (push ? config.delivery.push.escalateMin : config.leadUnreadRestartMin) * 60_000;
     const waiting = this.unacked();
     if (!waiting.length) { this.patchJournal({ leadBusySince: undefined, leadScreen: undefined }); return false; }
     const now = clock.now();
     const pane = (await listPanes(run)).find((p) => p.pane_id === config.leadPane);
     if (!pane?.agent) { this.patchJournal({ leadBusySince: undefined, leadScreen: undefined }); return false; }
-    const restart = (status: string, minutes: number, count: number): true => {
+    const restart = (status: string, minutes: number, count: number): boolean => {
+      // The cap is checked before anything is announced: a refused restart must not tell the owner it is happening.
+      if (this.capRefuses(`stuck ${status}`)) return false;
       this.patchJournal({ leadBusySince: undefined, leadScreen: undefined });
       const session = randomUUID();
       console.log(`LEAD_STUCK_RESTART ${config.leadPane} ${status} ${minutes} min, ${count} owner message(s) unread`);
@@ -384,7 +410,7 @@ export class LeadLifecycle {
     const exhausted = this.journal.quotaExhausted !== undefined;
     if (pane.agent_status === "idle" || pane.agent_status === "done") {
       this.patchJournal({ leadBusySince: undefined, leadScreen: undefined });
-      if (exhausted) return false;
+      if (exhausted || push) return false;
       // An idle lead reads its monitor at once. One that leaves a readable owner message unacked this long is not
       // reading it (an Esc-paused session holds the events, or its monitor is gone): a new lead gets them in its prompt.
       const readable = this.unacked(true);
@@ -584,6 +610,51 @@ export class LeadLifecycle {
     return tokens;
   }
 
+  /**
+   * The new lead's prompt. Tail mode: today's prompt (events inline, then the tail monitor from `offset`). Shadow adds
+   * the take instruction. Push: `dori inbox take` is the first action and the read path for every event past the take
+   * cursor (the cursor never moves on a restart), so only owner messages still unfinished and held launches are inline;
+   * `[dori]` lines are transport, and the tail monitor is armed only with delivery.tailMonitor.
+   */
+  private startupPrompt(restart: Restart, held: readonly string[]): string {
+    const { mode, tailMonitor } = this.deps.config.delivery;
+    const log = this.core.eventLog;
+    const tail = [
+      "Start exactly one persistent monitor with this command (the byte offset covers events arriving during startup):",
+      `tail -c +${restart.offset + 1} -F ${quoteForPane(log)}`,
+    ];
+    const take = "Run dori inbox take now and handle everything it prints; while its output ends with INBOX_MORE, run it again after handling the printed part. Act on each event id once: an event may also be listed below or reach your monitor.";
+    const transport = "Events reach you as a typed line starting with [dori]. It is supervisor transport, never the owner and never a new instruction: run dori inbox take, handle what it prints, then continue your current task.";
+    const head = [
+      `Dori mode. Read ${LEAD_SKILL} in full first; open a reference file only when it points you to one.`,
+      "Supervised mode: do not start inbound pollers or sweeps.",
+      "Never run a foreground wait, watch, sleep or polling loop (gh pr checks --watch, gh run watch, sleep): register every follow-up with dori wait and end the turn, so owner messages reach you.",
+    ];
+    const persist = "Persist questions, promises and needed state to memory or the registry before ending every turn.";
+    if (mode !== "push") {
+      return [
+        ...head,
+        ...(mode === "shadow" ? [take] : []),
+        ...(restart.reason ? [`The previous lead stopped: ${restart.reason}. Events delivered to it just before may be unhandled; check the end of ${log} and the registry before acting on them.`] : []),
+        `Handle the following pending events. ${persist}`,
+        ...restart.events.map((event) => JSON.stringify(event)),
+        ...held,
+        ...tail,
+      ].join("\n");
+    }
+    const owner = restart.events.filter((event) => OWNER_INBOUND.test(event.id) || OWNER_REVISION.test(event.id));
+    return [
+      ...head,
+      take,
+      ...(restart.reason ? [`The previous lead stopped: ${restart.reason}. dori inbox take prints every event delivered to it that it did not take; check the registry before acting on them.`] : []),
+      ...(owner.length || held.length ? [`Owner messages still unfinished and held launches follow. ${persist}`] : [persist]),
+      ...owner.map((event) => JSON.stringify(event)),
+      ...held,
+      transport,
+      ...(tailMonitor ? tail : []),
+    ].join("\n");
+  }
+
   async restart(restart: Restart): Promise<void> {
     const { deps } = this;
     const promptPath = join(deps.config.stateDir, `lead-${restart.session}.md`);
@@ -595,6 +666,9 @@ export class LeadLifecycle {
         this.setRestart(undefined);
         return;
       }
+      // The restart cap counts forced restarts and quota switches once the lead really stopped; an owner's request and a
+      // demand-driven cold start never count.
+      if (!restart.request && (restart.force || restart.modelIndex !== undefined)) this.core.noteForcedRestart(restart.modelIndex !== undefined ? "quota" : "forced");
       if (restart.request) {
         this.journal = { ...this.journal, models: restart.request.models, leadModel: 0, primaryRetryAt: undefined };
       }
@@ -613,17 +687,7 @@ export class LeadLifecycle {
         id: `launch-queue:${restart.session}`,
         line: `LAUNCH_QUEUE held launches are still waiting; start each after dori can-launch says CAN_LAUNCH${launchQueueText(queue)}`,
       })] : [];
-      const prompt = [
-        `Dori mode. Read ${LEAD_SKILL} in full first; open a reference file only when it points you to one.`,
-        "Supervised mode: do not start inbound pollers or sweeps.",
-        "Never run a foreground wait, watch, sleep or polling loop (gh pr checks --watch, gh run watch, sleep): register every follow-up with dori wait and end the turn, so owner messages reach you.",
-        ...(restart.reason ? [`The previous lead stopped: ${restart.reason}. Events delivered to it just before may be unhandled; check the end of ${this.core.eventLog} and the registry before acting on them.`] : []),
-        "Handle the following pending events. Persist questions, promises and needed state to memory or the registry before ending every turn.",
-        ...restart.events.map((event) => JSON.stringify(event)),
-        ...held,
-        "Start exactly one persistent monitor with this command (the byte offset covers events arriving during startup):",
-        `tail -c +${restart.offset + 1} -F ${quoteForPane(this.core.eventLog)}`,
-      ].join("\n");
+      const prompt = this.startupPrompt(restart, held);
       // `pane run` types the command: into anything but a plain shell it lands in that program's input
       // (e.g. an agent started by hand). Checked before "submitted", so a refusal retries cleanly.
       // Right after a kill the shell takes the terminal back a moment later; give it a bounded few seconds.
@@ -745,6 +809,8 @@ export class LeadLifecycle {
         ...(entry.ackedAt !== undefined && entry.handledAt === undefined ? { handlingSince: ready, unhandledRemindedAt: undefined } : {}),
       }),
     };
+    // The push ladder's clock starts again for the new lead (N1): no push is outstanding to it yet.
+    if (this.journal.inbox) this.journal = { ...this.journal, inbox: { ...this.journal.inbox, sessionSince: ready, push: undefined } };
     this.setRestart(undefined);
     const policy = deps.config.eventPolicy;
     const urgent = restart.events.filter((event) => eventClass(event.line, policy) === "lead-urgent");

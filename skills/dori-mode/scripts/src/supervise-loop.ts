@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolveCredential } from "./credentials.ts";
-import { configPath, saveLeadPane } from "./config.ts";
+import { configPath, deliveryConfigError, saveLeadPane } from "./config.ts";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Database } from "bun:sqlite";
@@ -254,6 +254,8 @@ export const supervise = async (
   if (!Number.isFinite(deps.config.leadUnreadRestartMin) || deps.config.leadUnreadRestartMin <= 0) throw new SuperviseError("leadUnreadRestartMin must be positive");
   if (!Number.isInteger(deps.config.leadPrimaryReturnChecks) || deps.config.leadPrimaryReturnChecks <= 0) throw new SuperviseError("leadPrimaryReturnChecks must be a positive integer");
   if (!Number.isInteger(deps.config.waitMaxFailures) || deps.config.waitMaxFailures <= 0) throw new SuperviseError("waitMaxFailures must be a positive integer");
+  const deliveryProblem = deliveryConfigError(deps.config.delivery);
+  if (deliveryProblem) throw new SuperviseError(deliveryProblem);
   setDefaultRunTimeout(deps.config.runTimeoutMs);
   let release: (() => void) | undefined;
   let ready = false;
