@@ -177,6 +177,8 @@ export type DoriConfig = {
   /** Minutes after reading an owner message to link all tasks with dori handled; a second window notifies the owner. */
   readonly handledTimeoutMin: number;
   readonly unhandledNotice: string;
+  /** Minutes after a lane finished (LANE_CLOSED, CI_MERGED) for the lead to tell the owner and run dori reported before UNREPORTED. */
+  readonly reportTimeoutMin: number;
   readonly heavySlots: number;
   readonly heavyMaxLoad: number;
   readonly deadPanePatterns: readonly string[];
@@ -255,6 +257,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   ackMissingNotice: "Your message reached the lead session, but it has not confirmed reading it yet. It has been reminded and will answer here.",
   handledTimeoutMin: 30,
   unhandledNotice: "Your message was read, but not all of its tasks have been linked to work or a reply. The lead has been reminded to handle it.",
+  reportTimeoutMin: 5,
   heavySlots: 1,
   heavyMaxLoad: 80,
   deadPanePatterns: ["has stopped", "no suitable jobs"],

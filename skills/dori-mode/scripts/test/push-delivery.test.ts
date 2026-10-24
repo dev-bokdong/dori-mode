@@ -9,6 +9,8 @@ import { inputState, pointerText } from "../src/supervise-push.ts";
 import { sessionDirFor } from "../src/session-id.ts";
 import { recordAck, recordHandled } from "../src/ack.ts";
 import { take, takeOutput } from "../src/inbox.ts";
+import { resolveEventPolicy } from "../src/event-policy.ts";
+import { recordReported } from "../src/lane-outcomes.ts";
 import { depsFor, fakeClock, newWorld, readJournal, withState, writeJournal } from "./fakes.ts";
 
 const cleanups: (() => void)[] = [];
@@ -282,6 +284,39 @@ test("a new lead is not escalated before escalateMin after its start, and gets a
   f.clock.at += 61_000;
   await flush(supervisor);
   expect(f.launches()).toHaveLength(2);
+});
+
+test("a finished lane taken but not reported keeps an idle lead pushed and escalates it like an untaken urgent event; dori reported ends it", async () => {
+  const f = fixture({ delivery: delivery({ tailMonitor: false }), eventPolicy: resolveEventPolicy({ kinds: { LANE_CLOSED: "lead-urgent" } }) });
+  const supervisor = new Supervisor(f.deps);
+  supervisor.enqueue("lane-closed:alpha", "LANE_CLOSED alpha merged");
+  await flush(supervisor);
+  expect(f.texts()).toHaveLength(1);
+  expect(takeOutput(take(f.state.dir, { maxBytes: 16_384, now: f.clock.now() }))).toEqual(["lane-closed:alpha\tLANE_CLOSED alpha merged"]);
+  await flush(supervisor);
+  expect(f.texts()).toHaveLength(1);
+  // Taken, yet past reportTimeoutMin it is pushed again with nothing untaken in the log.
+  f.clock.at += 5 * 60_000;
+  await flush(supervisor);
+  expect(f.texts()).toHaveLength(2);
+  expect(f.texts()[1]).toStartWith("[dori] supervisor: 1 new event (urgent: UNREPORTED).");
+  for (let i = 0; i < 8 && !f.launches().length; i++) {
+    f.clock.at += 60_000;
+    await flush(supervisor);
+  }
+  expect(f.launches()).toHaveLength(1);
+  const prompt = f.prompt() ?? "";
+  expect(prompt).toContain("it did not take pushed events (1 finished lane(s) not reported to the owner for 5 min)");
+  expect(prompt.split("\n")).toContain("UNREPORTED alpha LANE_CLOSED alpha merged");
+  recordReported(f.state.dir, "alpha", f.clock.now());
+  await supervisor.reportTick();
+  const pushed = f.texts().length;
+  for (let i = 0; i < 12; i++) {
+    f.clock.at += 60_000;
+    await flush(supervisor);
+  }
+  expect(f.texts()).toHaveLength(pushed);
+  expect(f.launches()).toHaveLength(1);
 });
 
 test("with the tail monitor on, an acked owner message leaves the untaken set and never restarts; other events only re-push", async () => {

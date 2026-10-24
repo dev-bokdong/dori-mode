@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { FlowDeps } from "./done-flow.ts";
 import { DEFAULT_EVENT_POLICY, eventClass, type EventPolicy, forLead } from "./event-policy.ts";
 import { scrubForThread } from "./freshness.ts";
+import type { OutcomeTracking } from "./lane-outcomes.ts";
 import { listPanes } from "./panes.ts";
 import { pendingLeadRestart } from "./lead-restart.ts";
 import { type Event, type Journal, type JournalCore, TransientSuperviseError } from "./supervise-journal.ts";
@@ -29,8 +30,8 @@ export class Delivery {
   private flushing?: Promise<void>;
   private readonly push: PushDelivery;
 
-  constructor(private readonly core: JournalCore, private readonly owners: OwnerTracking, private readonly lead: LeadLifecycle) {
-    this.push = new PushDelivery(core, lead);
+  constructor(private readonly core: JournalCore, private readonly owners: OwnerTracking, private readonly lead: LeadLifecycle, outcomes: OutcomeTracking) {
+    this.push = new PushDelivery(core, lead, outcomes);
   }
 
   private get deps(): FlowDeps { return this.core.deps; }

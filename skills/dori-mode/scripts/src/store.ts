@@ -20,7 +20,7 @@ export const SQLITE_FILE = "supervisor.sqlite";
 export const PRE_SQLITE_FILE = "supervisor.json.pre-sqlite";
 /** The json store's lead wakes (lead-wakes.ts), one JSON object per line: a wake, or `{close, calls}` closing one. */
 export const WAKES_FILE = "lead-wakes.jsonl";
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 /** Every row belongs to the single lead today; per-lead rows arrive with Phase 3. */
 export const DEFAULT_LEAD = "dori";
 
@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS lead_state (
  * 2: dedupe tombstones of pruned events, and the GitHub poll state that was github-events.json.
  * 3: lead wakes with their trigger kinds and model calls (lead-wakes.ts).
  * 4: the lead's take cursor and push state (`inbox`) and the forced restarts of the last hour (supervise-push.ts).
+ * 5: lane outcome report obligations (`outcomes`, lane-outcomes.ts).
  */
 const MIGRATIONS: readonly (readonly [number, string | ((db: Database) => void)])[] = [[2, `
 CREATE TABLE IF NOT EXISTS event_tombstones (id TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
@@ -197,7 +198,8 @@ CREATE TABLE IF NOT EXISTS lead_wakes (
   seq INTEGER PRIMARY KEY, lead TEXT NOT NULL, at INTEGER NOT NULL, session TEXT NOT NULL, trigger TEXT NOT NULL, kinds TEXT NOT NULL,
   calls INTEGER, closed INTEGER);
 CREATE INDEX IF NOT EXISTS lead_wakes_at ON lead_wakes (at);
-`], [4, (db) => addColumns(db, "lead_state", ["inbox TEXT", "forced_restarts TEXT"])]];
+`], [4, (db) => addColumns(db, "lead_state", ["inbox TEXT", "forced_restarts TEXT"])],
+  [5, (db) => addColumns(db, "lead_state", ["outcomes TEXT"])]];
 
 /** ADD COLUMN has no IF NOT EXISTS: a migration replayed over a database that already has a column must skip it. */
 const addColumns = (db: Database, table: string, columns: readonly string[]): void => {
@@ -213,7 +215,7 @@ const LEAD_STATE = [
   ["leadModel", "lead_model", false], ["primaryRetryAt", "primary_retry_at", false], ["primaryClearChecks", "primary_clear_checks", false],
   ["quotaExhausted", "quota_exhausted", true], ["models", "models", true], ["quotaStallSince", "quota_stall_since", false],
   ["leadBusySince", "lead_busy_since", false], ["leadScreen", "lead_screen", true], ["emergencyEpisode", "emergency_episode", false],
-  ["inbox", "inbox", true], ["forcedRestarts", "forced_restarts", true],
+  ["inbox", "inbox", true], ["forcedRestarts", "forced_restarts", true], ["outcomes", "outcomes", true],
 ] as const satisfies readonly (readonly [keyof Journal, string, boolean])[];
 
 /** Every Journal field this store maps (Appendix D). An import refuses a journal with any other field. */

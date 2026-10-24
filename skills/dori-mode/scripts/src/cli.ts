@@ -103,6 +103,8 @@ const USAGE = `dori <command> [options]
   report ack <id>                      inside a lane: confirm a supervisor message to this lane by its ID (CI follow-up)
   inbox take [--max-bytes N] [--peek]  the lead's read path: delivered events past the take cursor as id<TAB>line, whole lines
                                        up to N bytes (INBOX_MORE <lines> <bytes> when more wait, INBOX_EMPTY when none); writes a take receipt
+  reported <key> [--note TEXT]         the lead's receipt that it told the owner a finished lane's outcome (after LANE_CLOSED or CI_MERGED);
+                                       without it the supervisor sends urgent UNREPORTED <key> after reportTimeoutMin
   ack <channel> <messageId> [...]      the lead's read receipt (one <channel> <messageId> pair per message) on a Discord owner message: hourglass off, eyes on, ack recorded for the supervisor
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
@@ -182,7 +184,7 @@ const ownKey = async (command: string, k: string | undefined): Promise<string | 
 };
 
 /** Lead-only commands: a lane (DORI_LANE_KEY or its pane) may not run them. */
-const LEAD_ONLY = new Set(["ack", "handled", "inbox", "launch", "adopt", "hold", "lead-restart", "lead-emergency", "store", "ops", "source", "schedule"]);
+const LEAD_ONLY = new Set(["ack", "handled", "reported", "inbox", "launch", "adopt", "hold", "lead-restart", "lead-emergency", "store", "ops", "source", "schedule"]);
 if (LEAD_ONLY.has(command)) {
   const caller = await callerLane(deps);
   if (caller !== undefined) die(`LANE_PERMISSION_DENIED lane ${caller} may not run ${command}; it is lead-only`);
@@ -560,7 +562,11 @@ try {
       if (parsed.positionals.join(" ") !== "take" || !Number.isSafeInteger(maxBytes) || maxBytes < 1) die("usage: dori inbox take [--max-bytes N (positive integer)] [--peek]");
       try {
         const result = take(config.stateDir, { maxBytes, peek: parsed.values.peek === true, now: realClock.now(), session: process.env.PI_SESSION_ID });
-        for (const line of takeOutput(result)) console.log(line);
+        // Finished lanes still owed to the owner are listed every time, before the INBOX_MORE / INBOX_EMPTY sentinel.
+        const { takeReminders } = await import("./lane-outcomes.ts");
+        const lines = takeOutput(result);
+        const sentinel = /^INBOX_(MORE|EMPTY)\b/.test(lines.at(-1) ?? "") ? lines.splice(-1) : [];
+        for (const line of [...lines, ...takeReminders(config.stateDir), ...sentinel]) console.log(line);
       } catch (e) {
         if (e instanceof InboxError) die(e.message, 2);
         throw e;
@@ -610,6 +616,18 @@ try {
         const acked = ackLaneMessage(messages, me ?? "", id ?? "", realClock.now());
         console.log(`LANE_MESSAGE_ACKED ${acked.lane} ${acked.id}`);
       } finally { messages.close(); }
+      break;
+    }
+    case "reported": {
+      // `dori reported <key> [--note T]`: the lead has told the owner about lane <key>'s outcome itself.
+      const { recordReported } = await import("./lane-outcomes.ts");
+      if (!key || flags.positionals.length > 1 || Object.keys(flags.values).some((name) => name !== "note") || ("note" in flags.values && !opt("note"))) {
+        die("usage: dori reported <key> [--note TEXT]");
+      }
+      if (!(await deps.registry.read(key ?? ""))) die(`no registered lane "${key}"`);
+      const note = opt("note");
+      recordReported(config.stateDir, key ?? "", realClock.now(), note ? oneLine(note) : undefined);
+      console.log(`REPORTED_RECORDED ${key}`);
       break;
     }
     case "handled": {

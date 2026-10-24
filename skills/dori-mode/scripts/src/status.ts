@@ -63,6 +63,8 @@ export type Status = {
   readonly gateway: GatewayView;
   /** Owner messages the lead was handed and reminded about (ACK_MISSING) without acking them yet. */
   readonly unacked: number;
+  /** Finished lanes (LANE_CLOSED, CI_MERGED) the lead has not reported to the owner with dori reported, oldest first. */
+  readonly unreported?: readonly { readonly lane: string; readonly since: string }[];
   /** The supervisor's last Claude usage read (dori quota and launches refresh it too). */
   readonly claude?: QuotaState;
   /** That read's headroom summed over every Claude account, e.g. "headroom 315% (hold-lanes < 50%, brief < 25%)". */
@@ -197,6 +199,20 @@ const readUnacked = (stateDir: string): number => readStoreView(stateDir, {
   sqlite: (db) => (db.query("SELECT count(*) AS n FROM owner_messages WHERE reminded = 1").get() as { n: number }).n,
 }) ?? 0;
 
+const readUnreported = (stateDir: string): NonNullable<Status["unreported"]> => {
+  const owed = (outcomes: unknown) => (Array.isArray(outcomes) ? outcomes : [])
+    .filter((entry: { lane?: unknown; since?: unknown; reportedAt?: unknown }) => typeof entry?.lane === "string" && typeof entry.since === "number" && entry.reportedAt === undefined)
+    .map((entry: { lane: string; since: number }) => ({ lane: entry.lane, since: new Date(entry.since).toISOString() }))
+    .sort((a, b) => a.since.localeCompare(b.since));
+  return readStoreView(stateDir, {
+    json: (journal) => owed(journal.outcomes),
+    sqlite: (db) => {
+      const row = db.query("SELECT outcomes FROM lead_state").get() as { outcomes?: string | null } | null;
+      return owed(row?.outcomes ? JSON.parse(row.outcomes) : []);
+    },
+  }) ?? [];
+};
+
 /** Cheap, offline guess at a lane's repo (owner/name from a gh -R in its Done signal, else the worktree directory) and PR number. */
 const laneRepoPr = (l: Lane): { repo?: string; pr?: number } => {
   const text = `${l.done} ${l.title}`;
@@ -243,6 +259,7 @@ export const collectStatus = async (d: StatusDeps): Promise<Status> => {
     },
     gateway: gatewayView(readGatewayStatus(d.config.stateDir), now),
     unacked: readUnacked(d.config.stateDir),
+    unreported: readUnreported(d.config.stateDir),
     ...(claude ? { claude, claudeHeadroom: headroomNote(gateVerdict(claude.usage, d.config.quotaGate)) } : {}),
     events: eventStats(d.config, now),
     sources: sourceViews(d.config.stateDir),
@@ -300,6 +317,13 @@ const problems = (s: Status, now: number): Problem[] => {
   if (!g.issueAuthors.length) out.push({ label: "no trusted issue authors", line: "issues: no trusted authors (githubIssueAuthors), new issues never wake the lead" });
   if (s.lead.state === "missing" || s.lead.state === "unknown") out.push({ label: `lead ${s.lead.state}`, line: "" });
   if (s.unacked > 0) out.push({ label: `unacked ${s.unacked}`, line: `acks: ${s.unacked} owner message${s.unacked === 1 ? "" : "s"} handed to the lead without its read receipt (dori ack) after ACK_MISSING` });
+  const owed = s.unreported ?? [];
+  if (owed.length) {
+    out.push({
+      label: `unreported ${owed.length}`,
+      line: `reports: finished lanes not reported to the owner (report, then dori reported <key>): ${owed.slice(0, 6).map((o) => `${o.lane} ${ago(o.since, now)}`).join(", ")}${owed.length > 6 ? `, +${owed.length - 6} more` : ""}`,
+    });
+  }
   const recovering = (kind: "pending" | "exhausted") => s.lanes.filter((lane) => lane.recovery === kind).map((lane) => lane.key);
   const exhausted = recovering("exhausted");
   const pending = recovering("pending");
