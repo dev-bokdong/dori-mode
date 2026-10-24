@@ -10,6 +10,7 @@ import { paneResetAt, providerQuota, QUOTA_SCREEN_LINES, quotaScreenHit, quotaSt
 import { kst } from "./claude-quota.ts";
 import { listPanes, readScreen, sendVerified } from "./panes.ts";
 import { quoteForPane } from "./launch.ts";
+import { handoffLines } from "./lane-outcomes.ts";
 import { procTable, resolveSession, sessionDirFor } from "./session-id.ts";
 import { statusOf } from "./registry.ts";
 import { Waits } from "./waits.ts";
@@ -631,6 +632,7 @@ export class LeadLifecycle {
       "Never run a foreground wait, watch, sleep or polling loop (gh pr checks --watch, gh run watch, sleep): register every follow-up with dori wait and end the turn, so owner messages reach you.",
     ];
     const persist = "Persist questions, promises and needed state to memory or the registry before ending every turn.";
+    const owed = handoffLines(this.core.journal);
     if (mode !== "push") {
       return [
         ...head,
@@ -639,6 +641,7 @@ export class LeadLifecycle {
         `Handle the following pending events. ${persist}`,
         ...restart.events.map((event) => JSON.stringify(event)),
         ...held,
+        ...owed,
         ...tail,
       ].join("\n");
     }
@@ -650,6 +653,7 @@ export class LeadLifecycle {
       ...(owner.length || held.length ? [`Owner messages still unfinished and held launches follow. ${persist}`] : [persist]),
       ...owner.map((event) => JSON.stringify(event)),
       ...held,
+      ...owed,
       transport,
       ...(tailMonitor ? tail : []),
     ].join("\n");

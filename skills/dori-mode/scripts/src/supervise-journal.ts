@@ -65,6 +65,24 @@ export type AwaitingAck = {
    */
   readonly quarantined?: true;
 };
+/**
+ * One report obligation per finished lane (lane-outcomes.ts): opened by its first LANE_CLOSED or CI_MERGED, joined by
+ * later ones, closed by `dori reported <key>`. `since` is the first outcome's enqueue time.
+ */
+export type LaneOutcome = {
+  readonly lane: string;
+  readonly since: number;
+  /** The first outcome line, cut; reminders and the cold handoff carry it. Absent when reported before any outcome. */
+  readonly line?: string;
+  readonly events?: readonly string[];
+  readonly reportedAt?: number;
+  readonly note?: string;
+  /** UNREPORTED events enqueued so far, and when the last one was. */
+  readonly reminders?: number;
+  readonly remindedAt?: number;
+  /** The first push pointer that carried it: its push escalation clock starts there at the earliest. */
+  readonly pushedAt?: number;
+};
 export type OwnerNoticeKind = "delay" | "ack" | "unhandled";
 export type Notice = { readonly attempts: number; readonly sent?: true };
 export type Journal = {
@@ -99,6 +117,8 @@ export type Journal = {
   readonly inbox?: Inbox;
   /** Forced restarts and quota switches of the last hour: the restart cap (delivery.restartMaxPerHour). */
   readonly forcedRestarts?: readonly ForcedRestart[];
+  /** Finished lanes and whether the lead has reported them to the owner (lane-outcomes.ts). */
+  readonly outcomes?: readonly LaneOutcome[];
 };
 /**
  * `takenOffset`: lead-events.log is taken (`dori inbox take` receipts) up to this byte, always a line end. `mode` is the

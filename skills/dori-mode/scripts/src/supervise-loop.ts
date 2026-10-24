@@ -249,6 +249,7 @@ export const supervise = async (
   if (!Number.isFinite(deps.config.ackTimeoutSec) || deps.config.ackTimeoutSec <= 0) throw new SuperviseError("ackTimeoutSec must be positive");
   if (!Number.isFinite(deps.config.runTimeoutMs) || deps.config.runTimeoutMs < 0) throw new SuperviseError("runTimeoutMs must be zero or positive");
   if (!Number.isFinite(deps.config.handledTimeoutMin) || deps.config.handledTimeoutMin <= 0) throw new SuperviseError("handledTimeoutMin must be positive");
+  if (!Number.isFinite(deps.config.reportTimeoutMin) || deps.config.reportTimeoutMin <= 0) throw new SuperviseError("reportTimeoutMin must be positive");
   if (!Number.isFinite(deps.config.leadQuotaBusySwitchMin) || deps.config.leadQuotaBusySwitchMin <= 0) throw new SuperviseError("leadQuotaBusySwitchMin must be positive");
   if (!Number.isFinite(deps.config.leadStuckRestartMin) || deps.config.leadStuckRestartMin <= 0) throw new SuperviseError("leadStuckRestartMin must be positive");
   if (!Number.isFinite(deps.config.leadUnreadRestartMin) || deps.config.leadUnreadRestartMin <= 0) throw new SuperviseError("leadUnreadRestartMin must be positive");
@@ -420,6 +421,12 @@ export const supervise = async (
         catch (e) { console.error(`UNHANDLED_NOTICE_FAILED ${channel}/${message}: ${e instanceof Error ? e.message : String(e)}`); }
       }
     };
+    // A finished lane the lead did not report to the owner (dori reported) in time: UNREPORTED wakes the lead. The
+    // supervisor never tells the owner itself.
+    const checkReported = async (): Promise<void> => {
+      try { await supervisor.reportTick(); }
+      catch (e) { console.error(`REPORT_CHECK_ERROR ${e instanceof Error ? e.message : String(e)}`); }
+    };
     let lastGitHub = -Infinity;
     console.log(`SUPERVISOR_READY ${supervisor.eventLog}`);
     await probe.step("ready", () => notify("READY=1"));
@@ -451,6 +458,7 @@ export const supervise = async (
         await noticeOverdue();
         await noticeUnacked();
         await noticeUnhandled();
+        await checkReported();
         if (!retry.due) return;
         // A fatal delivery error ends the supervisor, as in the loop.
         try { await watchdog.track("delivery", retry.tick()); } catch (e) { deliveryError = e; stop.abort(); }

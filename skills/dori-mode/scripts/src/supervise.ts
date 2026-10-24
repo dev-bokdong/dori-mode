@@ -9,6 +9,7 @@ import { OWNER_INBOUND, OWNER_REVISION, type OwnerMessage, OwnerTracking, quaran
 import { LeadLifecycle } from "./supervise-lead-lifecycle.ts";
 import { Delivery, OWNER_WARN_EVENTS } from "./supervise-delivery.ts";
 import { eventClass } from "./event-policy.ts";
+import { OutcomeTracking } from "./lane-outcomes.ts";
 
 /*
  * The supervisor in four parts: the journal (supervise-journal.ts), owner tracking (supervise-owner-tracking.ts), the
@@ -42,14 +43,16 @@ export class Supervisor {
   private readonly owners: OwnerTracking;
   private readonly lead: LeadLifecycle;
   private readonly delivery: Delivery;
+  private readonly outcomes: OutcomeTracking;
 
   constructor(deps: FlowDeps, hooks: SupervisorHooks = {}) {
     this.core = new JournalCore(deps);
     this.eventLog = this.core.eventLog;
     const enqueue = (id: string, line: string): void => { this.enqueue(id, line); };
     this.owners = new OwnerTracking(this.core, hooks, enqueue);
+    this.outcomes = new OutcomeTracking(this.core, enqueue);
     this.lead = new LeadLifecycle(this.core, this.owners, hooks, enqueue);
-    this.delivery = new Delivery(this.core, this.owners, this.lead);
+    this.delivery = new Delivery(this.core, this.owners, this.lead, this.outcomes);
     const { tail, cursor } = this.core.recoverLog();
     this.core.initInbox();
     // Owner state comes from its tracking rows, not from the history: an owner message in the history with neither a
@@ -61,6 +64,7 @@ export class Supervisor {
     if (cursor !== this.core.store.logCursor()) this.core.store.recordDeliveries(tail, cursor, deps.clock.now());
     // Announcements a previous run could not post (or crashed before posting) go out now.
     this.owners.drainOutbox();
+    this.outcomes.publish();
   }
 
   /** Releases the store (tests and shutdown); the supervisor must not be used afterwards. */
@@ -75,6 +79,7 @@ export class Supervisor {
     (this.core.journal.events as Event[]).push(event);
     this.core.eventIds.add(id);
     this.owners.trackOwners([event]);
+    this.outcomes.track(event);
     // An owner message is synced at once (its Discord cursor moves on right after); the rest within one loop pass (ackTick).
     this.core.persist(OWNER_INBOUND.test(id) || OWNER_REVISION.test(id) ? "full" : "normal");
     if (OWNER_WARN_EVENTS.some((prefix) => line.startsWith(`${prefix} `))) this.owners.announce(`warn:${id}`, scrubForThread(`Dori warning: ${event.line}`, homedir()));
@@ -98,6 +103,9 @@ export class Supervisor {
 
   /** An explicit ack starts the handling clock. A reminder gets a full second window before owner escalation. */
   handledTick(timeoutMs?: number): OwnerMessage[] { return this.owners.handledTick(timeoutMs); }
+
+  /** Consumes `dori reported` receipts and enqueues UNREPORTED for finished lanes the owner was not told about in time. */
+  reportTick(): Promise<void> { return this.outcomes.tick(this.core.deps.registry); }
 
   /** Called only after the messenger confirms a successful post. Failures remain eligible on the next tick. */
   noticeSent(kind: OwnerNoticeKind, channel: string, message: string): void { this.owners.noticeSent(kind, channel, message); }
